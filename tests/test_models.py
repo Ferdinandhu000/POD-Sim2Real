@@ -53,3 +53,37 @@ def test_triad_mno_freeze_macro():
         assert p.requires_grad
 
 
+@pytest.mark.parametrize("macro_op,micro_op", [
+    ("fno", "fno"),
+    ("itransformer", "fno"),
+    ("fno", "itransformer"),
+    ("mlp", "mlp"),
+])
+def test_triad_mno_modular_operators(macro_op, micro_op):
+    bases = _bases()
+    model = build_model(
+        "triad-mno", bases, width=8, input_steps=3, output_steps=3,
+        depth=1, heads=2, macro_rank=2, micro_rank=2,
+        macro_operator=macro_op, micro_operator=micro_op
+    )
+    x = torch.randn(1, 3, 2, 8, 12)
+    out = model(x)
+    assert out.shape == (1, 3, 2, 8, 12)
+    out.square().mean().backward()
+
+
+def test_triad_mno_zero_shot_super_resolution():
+    bases = _bases(height=8, width=12, rank=4)
+    model = build_model(
+        "triad-mno", bases, width=8, input_steps=3, output_steps=3,
+        depth=1, heads=2, macro_rank=2, micro_rank=2,
+        native_resolution=(8, 12)
+    )
+    x = torch.randn(1, 3, 2, 8, 12)
+    # Query 2x super-resolution
+    out_2x = model(x, height=16, width=24)
+    assert out_2x.shape == (1, 3, 2, 16, 24)
+    out_2x.square().mean().backward()
+
+
+

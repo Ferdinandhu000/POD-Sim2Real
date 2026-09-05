@@ -1,5 +1,4 @@
 from __future__ import annotations
-import copy
 import json
 import math
 import random
@@ -11,17 +10,6 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from .losses import compute_loss, compute_vorticity
 from .logging_utils import log_metrics
-
-
-class EMA:
-    def __init__(self, model, decay=0.999):
-        self.model = copy.deepcopy(model).eval()
-        self.decay = decay
-
-    @torch.no_grad()
-    def update(self, model):
-        for a, b in zip(self.model.parameters(), model.parameters()):
-            a.mul_(self.decay).add_(b, alpha=1 - self.decay)
 
 
 def _save(path, payload):
@@ -39,7 +27,6 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
     val_loader = DataLoader(val_ds, batch_size=config["batch_size"], shuffle=False, num_workers=config["num_workers"])
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable_params, lr=config["lr"], weight_decay=config["weight_decay"])
-    ema = EMA(model, config["ema_decay"])
     best = float("inf")
     best_epoch = 0
     bad = 0
@@ -62,8 +49,8 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
         resume_path = Path(resume)
         if resume_path.exists():
             payload = torch.load(resume_path, map_location=device, weights_only=False)
-            model.load_state_dict(payload.get("raw_model_state", payload["model_state"]), strict=False)
-            ema.model.load_state_dict(payload.get("model_state", payload["raw_model_state"]), strict=False)
+            state = payload.get("model_state") or payload.get("raw_model_state")
+            model.load_state_dict(state, strict=False)
             if payload.get("optimizer_state"):
                 opt.load_state_dict(payload["optimizer_state"])
             best = float(payload.get("best_val_loss", best))
@@ -101,7 +88,6 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip"])
             scaler.step(opt)
             scaler.update()
-            ema.update(model)
             totals["loss"] += loss.item()
             totals["mse"] += float(parts["mse"])
             totals["tke"] += float(parts["tke"])
@@ -109,11 +95,12 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
 
         val_sum = 0.0
         n = 0
+        model.eval()
         with torch.inference_mode():
             for x, y, _ in tqdm(val_loader, desc=f"{stage} Epoch {epoch:03d}/{epochs:03d} val", leave=False):
                 x, y = x.to(device), y.to(device)
                 with _autocast():
-                    pred = ema.model(x)
+                    pred = model(x)
                 val_sum += torch.nn.functional.mse_loss(pred.float(), y.float()).item() * len(x)
                 n += len(x)
         val = val_sum / max(n, 1)
@@ -139,11 +126,9 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
             metrics["epoch_seconds"],
         )
         payload = {
-            "model_state": ema.model.state_dict(),
+            "model_state": model.state_dict(),
             "raw_model_state": model.state_dict(),
             "optimizer_state": opt.state_dict(),
-            "scheduler_state": None,
-            "ema_state": ema.model.state_dict(),
             "epoch": epoch,
             "best_epoch": best_epoch,
             "best_val_loss": min(best, val),
@@ -172,7 +157,7 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
 
     (stage_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
     logger.info("%s complete: best_epoch=%d best_val_loss=%.6g", stage, best_epoch, best)
-    return ema.model.state_dict(), best, best_epoch
+    return model.state_dict(), best, best_epoch
 
 
 def evaluate_model(model, dataset, device, batch_size=1, num_workers=0) -> dict[str, float]:

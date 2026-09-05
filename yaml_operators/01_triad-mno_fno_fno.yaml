@@ -36,6 +36,8 @@ logging:
   tensorboard: false
 model:
   name: triad-mno
+  macro_operator: fno
+  micro_operator: fno
   width: 32
   depth: 3
   heads: 4

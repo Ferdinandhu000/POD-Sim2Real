@@ -207,7 +207,6 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
             "patience": int(training.get("patience", 10)),
             "lr": float(opt.get("lr", 2e-4)),
             "weight_decay": float(opt.get("weight_decay", 1e-4)),
-            "ema_decay": float(training.get("ema_decay", 0.999)),
             "grad_clip": float(training.get("grad_clip", 1.0)),
             "field_weight": float(loss.get("field_weight", 0.0)),
             "tke_weight": float(loss.get("tke_weight", 0.05)),

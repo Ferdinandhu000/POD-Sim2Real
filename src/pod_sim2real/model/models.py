@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
 import numpy as np
@@ -395,6 +396,91 @@ class UNet1dCoeff(nn.Module):
         return self.project(out)                      # [B, output_steps, variables]
 
 
+class iTransformer1dCoeff(nn.Module):
+    """Inverted Transformer operator over 1D POD modal coefficient channels."""
+    def __init__(self, rank, width=32, depth=3, heads=4, dropout=0.0, input_steps=20, output_steps=20):
+        super().__init__()
+        self.rank = rank
+        self.variables = 2 * rank
+        self.input_steps = input_steps
+        self.output_steps = output_steps
+        if width % heads:
+            heads = max(1, math.gcd(width, heads))
+        self.embed = nn.Linear(input_steps, width)
+        self.channel_embedding = nn.Embedding(2, width)
+        self.mode_embedding = nn.Embedding(rank, width)
+        self.dropout = nn.Dropout(dropout)
+        layer = nn.TransformerEncoderLayer(width, heads, width * 2, dropout, batch_first=True, norm_first=True, activation="gelu")
+        self.encoder = nn.TransformerEncoder(layer, depth, enable_nested_tensor=False)
+        self.head = nn.Linear(width, output_steps)
+
+    def forward(self, x):
+        # x: [B, input_steps, 2*rank]
+        batch, steps, variables = x.shape
+        tokens = x.transpose(1, 2)  # [B, 2*rank, input_steps]
+        means = tokens.mean(dim=-1, keepdim=True).detach()
+        scales = tokens.var(dim=-1, keepdim=True, unbiased=False).add(1e-5).sqrt().detach()
+        norm_tokens = (tokens - means) / scales
+
+        channels = torch.arange(2, device=x.device).repeat_interleave(self.rank)
+        modes = torch.arange(self.rank, device=x.device).repeat(2)
+        pos = self.channel_embedding(channels) + self.mode_embedding(modes)
+
+        embedded = self.dropout(self.embed(norm_tokens) + pos.unsqueeze(0))
+        encoded = self.encoder(embedded)
+        out = (self.head(encoded) * scales + means).transpose(1, 2)  # [B, output_steps, 2*rank]
+        return out
+
+
+class MLP1dCoeff(nn.Module):
+    """1D MLP / ResNet operator across POD modal coefficients."""
+    def __init__(self, rank, width=32, layers=3, input_steps=20, output_steps=20):
+        super().__init__()
+        self.rank = rank
+        self.variables = 2 * rank
+        self.time_proj = nn.Linear(input_steps, output_steps) if input_steps != output_steps else nn.Identity()
+        self.lift = nn.Linear(self.variables, width)
+        blocks = []
+        for _ in range(layers):
+            blocks.extend([
+                nn.Linear(width, width),
+                nn.GELU(),
+            ])
+        self.mlp = nn.Sequential(*blocks)
+        self.proj = nn.Linear(width, self.variables)
+
+    def forward(self, x):
+        # x: [B, input_steps, 2*rank]
+        x_time = self.time_proj(x.transpose(1, 2)).transpose(1, 2)
+        h = self.lift(x_time)
+        h = h + self.mlp(h)
+        return self.proj(h)
+
+
+def build_coeff_operator(
+    op_type: str,
+    rank: int,
+    width: int = 32,
+    depth: int = 3,
+    heads: int = 4,
+    dropout: float = 0.0,
+    modes: int = 8,
+    input_steps: int = 20,
+    output_steps: int = 20,
+):
+    op = (op_type or "fno").lower().replace("_", "-")
+    if op in ("fno", "fno1d"):
+        return FNO1dCoeff(rank, width=width, layers=depth, modes=min(modes, input_steps // 2 + 1), input_steps=input_steps, output_steps=output_steps)
+    elif op in ("unet", "unet1d"):
+        return UNet1dCoeff(rank, width=width, input_steps=input_steps, output_steps=output_steps)
+    elif op in ("itransformer", "transformer"):
+        return iTransformer1dCoeff(rank, width=width, depth=depth, heads=heads, dropout=dropout, input_steps=input_steps, output_steps=output_steps)
+    elif op in ("mlp", "linear", "resnet"):
+        return MLP1dCoeff(rank, width=width, layers=depth, input_steps=input_steps, output_steps=output_steps)
+    else:
+        raise ValueError(f"Unsupported coefficient operator: {op_type}")
+
+
 class PODModel(nn.Module):
     def __init__(self, bases, kind="fno", width=32, input_steps=20, output_steps=20, depth=3, heads=4, dropout=0.0, slice_num=16, modes=8):
         super().__init__()
@@ -526,6 +612,9 @@ class TriadMNO(nn.Module):
         dropout=0.0,
         use_triad_attn=True,
         use_continuous_field=True,
+        macro_operator="fno",
+        micro_operator="fno",
+        native_resolution=None,
         **kwargs,
     ):
         super().__init__()
@@ -540,6 +629,8 @@ class TriadMNO(nn.Module):
         self.input_steps, self.output_steps = input_steps, output_steps
         self.use_triad_attn = bool(use_triad_attn)
         self.use_continuous_field = bool(use_continuous_field)
+        self.macro_operator_name = macro_operator
+        self.micro_operator_name = micro_operator
 
         self.register_buffer("mean", torch.from_numpy(np.stack([b.mean for b in bases]).astype(np.float32)))
         self.register_buffer("modes_macro", torch.from_numpy(np.stack([b.modes[:macro_rank] for b in bases]).astype(np.float32)))
@@ -548,15 +639,30 @@ class TriadMNO(nn.Module):
         else:
             self.register_buffer("modes_micro", torch.zeros(2, 0, self.modes_macro.shape[-1], dtype=torch.float32))
 
+        num_points = bases[0].mean.shape[0]
+        if native_resolution is not None:
+            self.native_resolution = tuple(native_resolution)
+        elif num_points == 64 * 128:
+            self.native_resolution = (64, 128)
+        elif num_points == 32 * 64:
+            self.native_resolution = (32, 64)
+        else:
+            self.native_resolution = None
+
         self.macro_vars = 2 * macro_rank
         self.micro_vars = 2 * micro_rank
 
-        self.macro_net = FNO1dCoeff(macro_rank, width=width, layers=depth, modes=min(8, input_steps // 2 + 1), input_steps=input_steps, output_steps=output_steps)
+        self.macro_net = build_coeff_operator(
+            macro_operator, macro_rank, width=width, depth=depth, heads=heads,
+            dropout=dropout, input_steps=input_steps, output_steps=output_steps
+        )
 
         if micro_rank > 0:
-            self.micro_lift = nn.Linear(self.micro_vars, width)
-            self.micro_time_proj = nn.Linear(input_steps, output_steps) if input_steps != output_steps else nn.Identity()
-
+            self.micro_net = build_coeff_operator(
+                micro_operator, micro_rank, width=width, depth=depth, heads=heads,
+                dropout=dropout, input_steps=input_steps, output_steps=output_steps
+            )
+            self.micro_proj = nn.Linear(self.micro_vars, width)
             self.macro_proj = nn.Linear(self.macro_vars, width)
             self.triad_macro_to_micro = nn.MultiheadAttention(width, heads, dropout=dropout, batch_first=True)
             self.triad_norm1 = nn.LayerNorm(width)
@@ -566,6 +672,7 @@ class TriadMNO(nn.Module):
             else:
                 self.micro_linear_head = nn.Linear(width, self.micro_vars)
         else:
+            self.micro_net = None
             self.neural_field = None
 
     def freeze_macro(self, freeze: bool = True):
@@ -593,27 +700,53 @@ class TriadMNO(nn.Module):
     def field_macro(self, coefficients, height, width):
         batch, steps, variables = coefficients.shape
         flat = torch.einsum("btcr,crp->btcp", coefficients.reshape(batch, steps, 2, self.macro_rank), self.modes_macro) + self.mean[None, None]
-        return flat.reshape(batch, steps, 2, height, width)
+        num_points = flat.shape[-1]
+        if height * width == num_points:
+            return flat.reshape(batch, steps, 2, height, width)
+
+        # Zero-shot spatial super-resolution / arbitrary resolution querying (Option A)
+        if self.native_resolution and self.native_resolution[0] * self.native_resolution[1] == num_points:
+            nh, nw = self.native_resolution
+        else:
+            nh = int(round(math.sqrt(num_points / 2)))
+            nw = num_points // nh
+        u_native = flat.reshape(batch * steps, 2, nh, nw)
+        u_interp = F.interpolate(u_native, size=(height, width), mode="bicubic", align_corners=True)
+        return u_interp.reshape(batch, steps, 2, height, width)
 
     def field_micro(self, coefficients, height, width):
         batch, steps, variables = coefficients.shape
         flat = torch.einsum("btcr,crp->btcp", coefficients.reshape(batch, steps, 2, self.micro_rank), self.modes_micro)
-        return flat.reshape(batch, steps, 2, height, width)
+        num_points = flat.shape[-1]
+        if height * width == num_points:
+            return flat.reshape(batch, steps, 2, height, width)
 
-    def forward(self, x):
-        batch, steps, _, height, width = x.shape
+        if self.native_resolution and self.native_resolution[0] * self.native_resolution[1] == num_points:
+            nh, nw = self.native_resolution
+        else:
+            nh = int(round(math.sqrt(num_points / 2)))
+            nw = num_points // nh
+        u_native = flat.reshape(batch * steps, 2, nh, nw)
+        u_interp = F.interpolate(u_native, size=(height, width), mode="bicubic", align_corners=True)
+        return u_interp.reshape(batch, steps, 2, height, width)
+
+    def forward(self, x, height=None, width=None):
+        batch, steps, _, in_h, in_w = x.shape
         if steps != self.input_steps:
             raise ValueError(f"expected {self.input_steps} input steps")
+        out_h = height or in_h
+        out_w = width or in_w
 
         c_macro = self.coeff_macro(x)
         pred_macro = self.macro_net(c_macro)
-        u_macro = self.field_macro(pred_macro, height, width)
+        u_macro = self.field_macro(pred_macro, out_h, out_w)
 
         if self.micro_rank == 0:
             return u_macro
 
         c_micro = self.coeff_micro(x)
-        z_micro = self.micro_time_proj(self.micro_lift(c_micro).transpose(1, 2)).transpose(1, 2)
+        pred_micro = self.micro_net(c_micro)  # Independent temporal prediction!
+        z_micro = self.micro_proj(pred_micro)
         z_macro = self.macro_proj(pred_macro)
 
         if self.use_triad_attn:
@@ -623,10 +756,10 @@ class TriadMNO(nn.Module):
             z_micro_fused = z_micro
 
         if self.use_continuous_field:
-            delta_u = self.neural_field(z_micro_fused, height, width, x.device)
+            delta_u = self.neural_field(z_micro_fused, out_h, out_w, x.device)
         else:
             c_micro_pred = self.micro_linear_head(z_micro_fused)
-            delta_u = self.field_micro(c_micro_pred, height, width)
+            delta_u = self.field_micro(c_micro_pred, out_h, out_w)
 
         return u_macro + delta_u
 
@@ -655,6 +788,9 @@ def build_model(name, bases=None, width=32, input_steps=20, output_steps=20, **o
             micro_rank=options.get("micro_rank"),
             use_triad_attn=options.get("use_triad_attn", True),
             use_continuous_field=options.get("use_continuous_field", True),
+            macro_operator=options.get("macro_operator", "fno"),
+            micro_operator=options.get("micro_operator", "fno"),
+            native_resolution=options.get("native_resolution", None),
         )
     if name.startswith("pod-"):
         if bases is None:
