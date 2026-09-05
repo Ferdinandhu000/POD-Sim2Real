@@ -7,8 +7,8 @@ runs/
 *.npz
 *.ckpt
 
-# 2. 数据文件
-data/
+# 2. 数据文件（加斜杠表示仅忽略根目录的 data/，保留 src/ 源码中的 data 包）
+/data/
 *.arrow
 *.h5
 *.npy
