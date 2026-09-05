@@ -1,27 +1,104 @@
-# POD-Sim2Real
+# POD-Sim2Real: Sim-to-Real Flow Forecasting with Triad-MNO
 
-Reusable Sim-to-Real flow forecasting baselines for RealPDEBench foil data.
-The project reads Hugging Face Arrow trajectory shards, audits Real/Sim
-settings, renders synchronized videos, and trains a common set of U-Net, FNO,
-AFNO and POD models with Sim pretraining followed by Real fine-tuning.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch 2.1+](https://img.shields.io/badge/PyTorch-2.1+-ee4c2c.svg)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-## Data
+[**English**](README.md) | [**简体中文**](README_zh.md)
 
-Large Arrow shards are intentionally excluded from Git. For the current small
-local smoke dataset, mount them as:
+This repository contains the official implementation of **Triad-MNO** (Triad-Coupled Modal Neural Operator with Continuous Spatial Residual Fields) and a comprehensive Sim-to-Real benchmarking suite on the **RealPDEBench NACA0025 Hydrofoil** dataset.
 
-```text
-data/data_real/*.arrow
-data/data_sim/*.arrow
+The framework supports numerical simulation pre-training, experimental PIV fine-tuning, automated early stopping with best-checkpoint archiving, and one-click multi-subset evaluation exporting publication-ready Excel reports.
+
+---
+
+## Key Highlights
+
+1. **Triad-MNO Architecture**:
+   - **Hussain-Reynolds Triple Decomposition**: $\mathbf{u}(\mathbf{x}, t) = \overline{\mathbf{U}}(\mathbf{x}) + \widetilde{\mathbf{u}}(\mathbf{x}, t) + \mathbf{u}''(\mathbf{x}, t)$, separating base flow, macro coherent structures (Modes 1–32), and fine-scale turbulent residuals (Modes 33–64).
+   - **Continuous Neural Field Decoder**: An implicit coordinate neural field $(x, y) \in [-1, 1]^2 \to \Delta \mathbf{u}(\mathbf{x}, t)$ that decodes micro-modes, avoiding modal submergence and enabling zero-shot super-resolution.
+   - **Cross-Scale Triad Attention**: Parameterizes Navier-Stokes quadratic advective triad interactions ($Q_{ijk} a_j a_k$) between macro and micro latent tokens.
+   - **Vorticity / Enstrophy Regularizer**: Central finite-difference vorticity loss preserving high-frequency rotational dynamics.
+   - **Macro-Backbone Freezing (`freeze_macro: true`)**: Retains universal vortex-shedding frequencies learned from simulation while adapting subgrid boundary layers on experimental data.
+
+2. **Rigid 2000-Frame Cutoff (`prefix_frames: 2000`)**:
+   - Truncates all trajectories to the first 2000 frames across training, validation, and testing, strictly preventing temporal data leakage.
+
+3. **Batch Experiment Execution & Model Isolation**:
+   - Run an entire directory of YAML configurations with `--config-dir`.
+   - Each model runs in an isolated directory (`artifacts/runs/[yaml_name]/`), preventing artifact overwriting.
+
+4. **Automated Best-Checkpoint Archiving**:
+   - Early stopping (patience = 10) automatically identifies the true optimal validation epoch (e.g., stop at epoch 53 $\to$ best epoch 43).
+   - Packages `best.pt`, `best_sim.pt`, `train.log`, `config.yaml`, `results.json`, `split_manifest.json`, `pod_u.npz`, `pod_v.npz`, and `info.txt` into `best_checkpoints/[yaml_name]/`.
+
+5. **One-Click Evaluation & Excel Export**:
+   - Evaluates all models in `best_checkpoints/` across official subsets: `seen`, `in_dist`, `out_dist`, and `all`.
+   - Generates timestamped reports `evaluation_results_YYYYMMDD_HHMMSS.xlsx` with `Summary` (matching paper Table 1), `Detailed_Subsets`, and `Per_Channel` sheets.
+
+---
+
+## Model Zoo
+
+### Main Comparison Suite (`yaml_main/`)
+| Config | Model | Architecture Type | Description |
+|:---|:---|:---|:---|
+| `00_unet_config.yaml` | `unet` | Direct Grid | 2D U-Net operating directly on spatial grids |
+| `01_fno_config.yaml` | `fno` | Direct Grid | 2D Fourier Neural Operator |
+| `02_afno_config.yaml` | `afno` | Direct Grid | 2D Adaptive Fourier Neural Operator |
+| `03_itransolver_config.yaml` | `itransolver` | Direct Grid | Spatial Transolver with physics-informed attention |
+| `04_pod-unet_config.yaml` | `pod-unet` | Modal ROM | Rank-32 POD basis + 1D U-Net coefficient model |
+| `05_pod-fno_config.yaml` | `pod-fno` | Modal ROM | Rank-32 POD basis + 1D FNO coefficient model |
+| `06_pod-afno_config.yaml` | `pod-afno` | Modal ROM | Rank-32 POD basis + 1D AFNO coefficient model |
+| `07_pod-itransformer_config.yaml` | `pod-itransformer` | Modal ROM | Rank-32 POD basis + Inverted Transformer |
+| `08_pod-transolver_config.yaml` | `pod-transolver` | Modal ROM | Rank-32 POD basis + Transolver coefficient model |
+| `09_triad-mno_config.yaml` | `triad-mno` | Hybrid Multi-Scale | **Triad-MNO** (Full proposed architecture) |
+
+### Systematic Ablation Suite (`yaml_ablation/`)
+| Config | Tested Variation | Description |
+|:---|:---|:---|
+| `00_triad-mno_full_config.yaml` | Full Triad-MNO | Full proposed model reference |
+| `01_triad-mno_no_attn_config.yaml` | w/o Triad Attention | Decoupled macro/micro evolution without cross-attention |
+| `02_triad-mno_linear64_config.yaml` | w/o Continuous Field | Replaces neural field decoder with standard linear 64-mode SVD |
+| `03_triad-mno_no_vort_config.yaml` | w/o Vorticity Loss | Trains with pure velocity MSE loss (no enstrophy constraint) |
+| `04_triad-mno_no_freeze_config.yaml` | w/o Macro Freezing | End-to-end real fine-tuning without freezing macro parameters |
+| `05_triad-mno_macro_only_config.yaml` | Macro-Only Baseline | Pure rank-32 macro model ($r_{\mathrm{macro}}=32, r_{\mathrm{micro}}=0$) |
+
+---
+
+## Installation & Server Setup
+
+### 1. Create Conda Environment
+```bash
+conda create -n realpde python=3.10 -y
+conda activate realpde
 ```
 
-Each record is decoded from the Arrow stream using `sim_id`, `shape_*`, and
-binary field columns. Matching is by normalized `(Re, AoA)` setting. Matching
-does not imply identical physical trajectories: Real and Sim fields are
-separate domain samples. Models train on `u/v`; pressure is ignored.
+### 2. Install PyTorch with CUDA
+Install the matching PyTorch wheel for your server's CUDA driver:
 
-For a complete RealPDEBench Foil download on a server, preserve the official
-Hugging Face directory rather than copying only the `.arrow` shards:
+```bash
+# For CUDA 11.8:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# For CUDA 12.1 / 12.4:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+```
+
+### 3. Install Dependencies & Project
+```bash
+# Install core dependencies (PyArrow, Datasets, OpenPyXL, Pandas, SciPy, etc.)
+pip install -r requirements.txt
+
+# Install this package in editable mode
+pip install -e .
+```
+
+---
+
+## Dataset Layout
+
+Download the official **RealPDEBench Foil** dataset from Hugging Face and place it in the `data/` directory:
 
 ```text
 data/
@@ -35,135 +112,105 @@ data/
     │   ├── train_index_numerical.json
     │   ├── val_index_numerical.json
     │   └── test_index_numerical.json
-    ├── remain_params_real.json
-    ├── in_dist_test_params_real.json
-    ├── out_dist_test_params_real.json
+    ├── remain_params_real.json         # Seen settings
+    ├── in_dist_test_params_real.json   # In-distribution settings
+    ├── out_dist_test_params_real.json  # Out-of-distribution settings
     ├── remain_params_numerical.json
     ├── in_dist_test_params_numerical.json
     └── out_dist_test_params_numerical.json
 ```
 
-The full directory is required because the loader uses
-`datasets.load_from_disk`; `state.json` and `dataset_info.json` describe the
-Arrow data and must remain next to it. In this layout the trainer detects the
-official index files automatically. Each index entry is one exact temporal
-window `(sim_id, time_id)`, so the repository does not randomly re-split the
-98 Real and 99 Numerical trajectories.
+All configurations automatically read from `data/foil/hf_dataset` and apply `prefix_frames: 2000` to prevent data leakage.
 
-## Install and audit
+---
 
-Use an environment containing PyTorch and PyArrow (the existing `RealPDEBench`
-environment already has PyArrow):
+## Usage Guide
+
+### 1. Batch Training (Main Comparison Models)
+Run all 10 baseline comparison models sequentially with automatic checkpoint archiving:
 
 ```bash
-python -m pip install -e .
-python -m pod_sim2real.visualization.audit_dataset --data-root .
-python -m pod_sim2real.visualization.render_pairs --data-root . --max-frames 0
+# Option A: Using the helper bash script
+bash scripts/train_main.sh
+
+# Option B: Direct Python command
+python -m pod_sim2real.training.train --config-dir yaml_main/
 ```
 
-`--max-frames 0` renders the complete trajectory. The Arrow records currently
-contain 3990 frames (about 20 seconds at the source `dt=0.005`); the MP4 is a
-full-frame inspection video, so its display duration is controlled by `--fps`.
-The `real_id`/`sim_id` values in `pairing.csv` are embedded logical identifiers
-(often the original `.h5` basename), while `real_arrow`/`sim_arrow` are the
-actual files used for reading.
-
-For readable domain comparison, videos use a fixed full-trajectory color scale
-for each `(domain, channel)` pair. Real and Sim therefore have independent
-u/v/speed limits; the limits are shown in each panel and stored in the video
-manifest. The scale never changes between frames.
-
-Outputs are written under `artifacts/audit` and `artifacts/videos` and are
-ignored by Git.
-
-## Smoke training
+### 2. Batch Training (Ablation Study)
+Run all 6 ablation configurations:
 
 ```bash
-python -m pod_sim2real.training.train --config configs/smoke.yaml --model unet
-python -m pod_sim2real.training.train --config configs/smoke.yaml --model fno
-python -m pod_sim2real.training.train --config configs/smoke.yaml --model afno
-python -m pod_sim2real.training.train --config configs/smoke.yaml --model pod-fno
-python -m pod_sim2real.training.train --config configs/smoke.yaml --model pod-afno
-python -m pod_sim2real.training.train --config configs/smoke.yaml --model pod-unet
-python -m pod_sim2real.training.train --config configs/smoke.yaml --model pod-itransformer
-python -m pod_sim2real.training.train --config configs/smoke.yaml --model itransolver
-python -m pod_sim2real.training.train --config configs/smoke.yaml --model pod-itransolver
+# Option A: Using the helper bash script
+bash scripts/train_ablation.sh
+
+# Option B: Direct Python command
+python -m pod_sim2real.training.train --config-dir yaml_ablation/
 ```
 
-Each run creates `artifacts/runs/<model>/` with `pretrain_sim` and
-`finetune_real` stages, checkpoints, JSON metrics, and logs. tqdm progress is
-shown in the terminal and epoch metrics are written to `logs/train.log` and
-`metrics.jsonl`.
+### 3. Running an Individual Config
+```bash
+python -m pod_sim2real.training.train --config yaml_main/09_triad-mno_config.yaml
+```
 
-## Full runs
-
-### Baseline: first third of every trajectory
-
-`configs/baseline.yaml` is the reproducible baseline configuration. It uses
-the official trajectory/parameter-level assignment from the six
-`*_index_{real,numerical}.json` files, so a complete filename belongs to only
-one of train, validation, or test. It then uses only the first third of every
-assigned 3990-frame trajectory (1330 frames). The default 32x64 resolution is
-a memory-conscious view of the original 128x256 fields; change it to
-`[128, 256]` for a full-resolution run. If the official index files are not
-available, the same mode falls back to a deterministic trajectory split using
-the configured seed and fractions. A trajectory is never divided between
-train, validation, and test; the prefix is taken only after assignment.
-
-Prefix experiments use `split_mode: trajectory_prefix`. The former
-`temporal_prefix` mode is unsupported because it could place different time
-ranges of one trajectory in different splits.
-
-Run the baseline U-Net on the server with:
+### 4. One-Click Multi-Subset Evaluation
+Evaluate all models archived in `best_checkpoints/` across `seen`, `in_dist`, `out_dist`, and `all` test splits:
 
 ```bash
-python -m pod_sim2real.training.train \
-  --config configs/baseline.yaml \
-  --model unet \
-  --data-root .
+# Option A: Using the helper bash script
+bash scripts/evaluate.sh
+
+# Option B: Direct Python command
+python -m pod_sim2real.training.evaluate --checkpoints-dir best_checkpoints/
 ```
 
-The split counts, exact trajectory IDs, and exact settings are saved in
-`artifacts/baseline_first_third/unet/split_manifest.json`; final test MSE is
-written to `artifacts/baseline_first_third/unet/results.json`. To run another baseline architecture,
-reuse the same config and change only `--model` to `fno` or `afno`.
+**Evaluation Outputs**:
+- `evaluation_results_YYYYMMDD_HHMMSS.xlsx`:
+  - **`Summary` Sheet**: Paper Table 1 format (Overall MSE, Rel-$L_2$, Vorticity MSE, Vorticity Rel-$L_2$).
+  - **`Detailed_Subsets` Sheet**: Granular breakdown across `all`, `seen`, `in_dist`, and `out_dist`.
+  - **`Per_Channel` Sheet**: Error metrics broken down by $u$ and $v$ velocity channels.
+- `evaluation_results_YYYYMMDD_HHMMSS.json`: Machine-readable results.
+- Formatted console summary table printed directly to stdout.
 
-With the official directory above, use the supplied configuration:
+---
+
+## Directory Structure
+
+```text
+POD-Sim2Real/
+├── configs/                # Template and fallback configs
+├── yaml_main/              # 10 official benchmark configs (00_unet to 09_triad-mno)
+├── yaml_ablation/          # 6 ablation study configs
+├── scripts/                # Bash & PowerShell launcher scripts
+│   ├── train_main.sh
+│   ├── train_ablation.sh
+│   └── evaluate.sh
+├── src/
+│   └── pod_sim2real/       # Core package
+│       ├── data/           # Arrow dataset streaming & windowing
+│       ├── model/          # Pure PyTorch models (TriadMNO, FNO, AFNO, Transolver, etc.)
+│       ├── training/       # Trainer, loss functions, batch runner, evaluator
+│       └── visualization/  # Audit tools & video renderers
+├── tests/                  # Pytest unit & regression tests
+├── best_checkpoints/       # Automatically archived optimal weights & logs (gitignored)
+├── artifacts/              # Intermediate training checkpoints and runs (gitignored)
+├── requirements.txt        # PIP dependencies
+├── pyproject.toml          # Build configuration
+└── README.md
+```
+
+---
+
+## Running Tests
+
+Run the complete regression suite (22 unit tests covering models, datasets, loss functions, batch training, and evaluation):
 
 ```bash
-python -m pod_sim2real.training.train \
-  --config configs/foil_official.yaml \
-  --model pod-fno \
-  --data-root .
+pytest tests
 ```
 
-`--data-root data` is also accepted when the server mounts the data directory
-directly. The program first pretrains on `numerical/train_index_numerical.json`,
-then fine-tunes on `real/train_index_real.json`, validates using the matching
-official validation index, and reports `real_test_mse` on the official real
-test index in `results.json`.
+---
 
-The default `test_mode: all` evaluates every test window. To match a standard
-Foil subset, set `data.test_mode` in a copied config or pass one of:
+## License
 
-```bash
---test-mode seen
---test-mode in_dist
---test-mode out_dist
---test-mode unseen
-```
-
-`seen` selects IDs in `remain_params_*`; `in_dist` and `out_dist` select their
-respective official parameter lists; `unseen` is their union. As in the
-upstream loader, a selected test mode filters the official validation and test
-windows, while training windows remain unchanged.
-
-The complete Foil data is large. `OfficialArrowWindowDataset` loads metadata
-and the requested trajectory row lazily, then decodes only the requested
-`input_steps + output_steps` window at runtime. Do not call
-`discover_trajectories` on the complete official dataset, since that fallback
-is intended only for the small standalone Arrow smoke files.
-
-Change resolution, epoch counts, `pod_rank`, batch size and paths in a copied
-YAML configuration. No code uses machine-specific absolute paths, so the same
-commands work on Linux servers.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
