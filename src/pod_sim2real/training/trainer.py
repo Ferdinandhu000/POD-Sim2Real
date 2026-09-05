@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from .losses import compute_loss
+from .losses import compute_loss, compute_vorticity
 from .logging_utils import log_metrics
 
 
@@ -202,6 +202,11 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0) -> dict[
     v_tgt_sq = 0.0
     v_elements = 0
 
+    vort_sq_err = 0.0
+    vort_abs_err = 0.0
+    vort_tgt_sq = 0.0
+    vort_elements = 0
+
     with torch.inference_mode():
         for x, y, _ in loader:
             x, y = x.to(device), y.to(device)
@@ -229,6 +234,16 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0) -> dict[
                 v_tgt_sq += v_y.square().sum().item()
                 v_elements += v_y.numel()
 
+            if y.ndim >= 4 and y.shape[2] == 2:
+                omega_pred = compute_vorticity(pred.float())
+                omega_tgt = compute_vorticity(y.float())
+                omega_diff = omega_pred - omega_tgt
+
+                vort_sq_err += omega_diff.square().sum().item()
+                vort_abs_err += omega_diff.abs().sum().item()
+                vort_tgt_sq += omega_tgt.square().sum().item()
+                vort_elements += omega_tgt.numel()
+
     mse = total_sq_err / max(total_elements, 1)
     rmse = math.sqrt(max(mse, 0.0))
     mae = total_abs_err / max(total_elements, 1)
@@ -252,6 +267,14 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0) -> dict[
             "v_rmse": math.sqrt(max(v_mse, 0.0)),
             "v_mae": v_abs_err / v_elements,
             "v_rel_l2": math.sqrt(v_sq_err) / (math.sqrt(v_tgt_sq) + 1e-8),
+        })
+    if vort_elements > 0:
+        vort_mse = vort_sq_err / vort_elements
+        res.update({
+            "vorticity_mse": vort_mse,
+            "vorticity_rmse": math.sqrt(max(vort_mse, 0.0)),
+            "vorticity_mae": vort_abs_err / vort_elements,
+            "vorticity_rel_l2": math.sqrt(vort_sq_err) / (math.sqrt(vort_tgt_sq) + 1e-8),
         })
     return res
 

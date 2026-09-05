@@ -22,7 +22,7 @@ training:
   use_amp: true
   ema_decay: 0.999
   grad_clip: 1.0
-  freeze_macro: true
+  freeze_macro: false
 optimizer:
   lr: 0.0002
   weight_decay: 0.0001

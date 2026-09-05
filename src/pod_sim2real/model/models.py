@@ -559,9 +559,7 @@ class TriadMNO(nn.Module):
 
             self.macro_proj = nn.Linear(self.macro_vars, width)
             self.triad_macro_to_micro = nn.MultiheadAttention(width, heads, dropout=dropout, batch_first=True)
-            self.triad_micro_to_macro = nn.MultiheadAttention(width, heads, dropout=dropout, batch_first=True)
             self.triad_norm1 = nn.LayerNorm(width)
-            self.triad_norm2 = nn.LayerNorm(width)
 
             if self.use_continuous_field:
                 self.neural_field = ContinuousNeuralFieldDecoder(latent_dim=width, hidden_dim=width * 2, out_channels=2)
@@ -572,6 +570,8 @@ class TriadMNO(nn.Module):
 
     def freeze_macro(self, freeze: bool = True):
         """Freeze macro temporal operator for Sim2Real domain adaptation (Strategy A)."""
+        if self.micro_rank == 0:
+            return
         for p in self.macro_net.parameters():
             p.requires_grad = not freeze
         if hasattr(self, "macro_proj"):

@@ -93,3 +93,21 @@ def test_batch_training_and_evaluate(tmp_path):
     # Verify isolation
     assert (runs_dir / "00_test_unet_config").exists()
     assert (runs_dir / "01_test_podfno_config").exists()
+
+
+def test_triad_mno_macro_only_freeze():
+    import numpy as np
+    from pod_sim2real.model import PODBasis, TriadMNO
+
+    dummy_modes = np.random.randn(32, 64).astype(np.float32)
+    dummy_mean = np.random.randn(64).astype(np.float32)
+    basis_u = PODBasis(dummy_mean, dummy_modes)
+    basis_v = PODBasis(dummy_mean, dummy_modes)
+
+    # micro_rank = 0
+    model = TriadMNO((basis_u, basis_v), macro_rank=32, micro_rank=0, width=16)
+    assert model.neural_field is None
+    # Calling freeze_macro should be a no-op and not freeze all parameters
+    model.freeze_macro(True)
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    assert len(trainable) > 0, "macro_only model should not have 0 trainable parameters after freeze_macro"

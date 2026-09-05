@@ -57,4 +57,7 @@ def test_evaluate_model_dictionary():
     assert 'rel_l2' in res
     assert 'u_mse' in res
     assert 'v_mse' in res
+    assert 'vorticity_mse' in res
+    assert 'vorticity_rel_l2' in res
+    assert not math.isnan(res['vorticity_rel_l2'])
     assert pytest.approx(res['mse']) == 1.0

@@ -26,6 +26,7 @@ def evaluate_all_checkpoints(
     batch_size: int = 16,
     num_workers: int = 4,
     prefix_frames_override: int | None = None,
+    resolution_override: tuple[int, int] | list[int] | None = None,
 ) -> Path:
     checkpoints_dir = Path(checkpoints_dir)
     if not checkpoints_dir.exists():
@@ -78,12 +79,11 @@ def evaluate_all_checkpoints(
         output_steps = int(data_cfg.get("output_steps", 20))
         raw_prefix = prefix_frames_override if prefix_frames_override is not None else data_cfg.get("prefix_frames", None)
         prefix_frames = int(raw_prefix) if (raw_prefix is not None and int(raw_prefix) > 0) else None
+        resolution = tuple(resolution_override or data_cfg.get("resolution", [64, 128]))
 
         # Resolve dataset directories
         root = Path(data_root or cfg.get("data_root") or Path.cwd())
         real_dir, sim_dir, index_root = _resolve_data_layout(root, data_cfg)
-        if not index_root:
-            raise FileNotFoundError(f"official index root not found under {root}")
 
         # Load POD bases if present
         bases = None
@@ -118,13 +118,19 @@ def evaluate_all_checkpoints(
         model.to(device).eval()
 
         # Evaluate across subsets
-        subsets = ["all", "in_dist", "out_dist", "seen"]
+        subsets = ["all", "in_dist", "out_dist", "seen"] if index_root else ["all"]
         model_metrics = {}
         for sub in subsets:
             try:
-                sub_ds = _official_dataset(
-                    real_dir, index_root, "real", "test", input_steps, output_steps, resolution, test_mode=sub, prefix_frames=prefix_frames
-                )
+                if index_root:
+                    sub_ds = _official_dataset(
+                        real_dir, index_root, "real", "test", input_steps, output_steps, resolution, test_mode=sub, prefix_frames=prefix_frames
+                    )
+                else:
+                    from ..data.arrow_dataset import ArrowWindowDataset, discover_trajectories
+                    real_trajs = discover_trajectories(real_dir, "real")
+                    stride = int(data_cfg.get("stride", 20))
+                    sub_ds = ArrowWindowDataset(real_trajs, input_steps, output_steps, stride, resolution)
                 m = evaluate_model(model, sub_ds, device, batch_size, num_workers)
                 m["windows"] = len(sub_ds)
                 model_metrics[sub] = m
@@ -218,7 +224,8 @@ def main():
     parser.add_argument("--device", type=str, default=None, help="Device to use (cuda/cpu)")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--prefix-frames", type=int, default=2000, help="Frames to evaluate from start of trajectories (default: 2000)")
+    parser.add_argument("--prefix-frames", type=int, default=None, help="Frames to evaluate from start of trajectories (default: None for full sequence)")
+    parser.add_argument("--resolution", nargs=2, type=int, default=None, help="Resolution override (H W)")
     args = parser.parse_args()
 
     evaluate_all_checkpoints(
@@ -230,6 +237,7 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         prefix_frames_override=args.prefix_frames,
+        resolution_override=args.resolution,
     )
 
 
