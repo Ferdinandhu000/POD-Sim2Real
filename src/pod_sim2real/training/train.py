@@ -100,11 +100,12 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
     workers = int(args.num_workers if args.num_workers is not None else training.get("num_workers", 0))
     epochs = int(args.epochs or training.get("pretrain_epochs", 2))
     input_steps, output_steps = int(data.get("input_steps", 20)), int(data.get("output_steps", 20))
-    prefix_frames = int(args.prefix_frames or data.get("prefix_frames", 2000))
+    raw_prefix = args.prefix_frames if args.prefix_frames is not None else data.get("prefix_frames", None)
+    prefix_frames = int(raw_prefix) if (raw_prefix is not None and int(raw_prefix) > 0) else None
 
     out.mkdir(parents=True, exist_ok=True)
     logger = make_logger(out / "logs")
-    logger.info("run_name=%s model=%s device=%s resolution=%s prefix_frames=%d real_dir=%s sim_dir=%s", run_name, model_name, device, resolution, prefix_frames, real_dir, sim_dir)
+    logger.info("run_name=%s model=%s device=%s resolution=%s prefix_frames=%s real_dir=%s sim_dir=%s", run_name, model_name, device, resolution, prefix_frames or "full", real_dir, sim_dir)
 
     official = bool(index_root and data.get("use_official_indices", False))
     bases = None

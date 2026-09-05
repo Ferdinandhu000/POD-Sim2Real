@@ -44,7 +44,7 @@ data/
     └── out_dist_test_params_real.json
 ```
 
-> **Note**: The pipeline rigidly cuts all trajectories to the first 2000 frames (`prefix_frames: 2000`) across train/val/test.
+> **Note**: The pipeline uses the complete dataset across train/val/test without frame truncation, supporting up to 1000 epochs with early stopping.
 
 ---
 

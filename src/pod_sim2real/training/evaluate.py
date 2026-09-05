@@ -76,8 +76,8 @@ def evaluate_all_checkpoints(
 
         input_steps = int(data_cfg.get("input_steps", 20))
         output_steps = int(data_cfg.get("output_steps", 20))
-        resolution = tuple(data_cfg.get("resolution", [64, 128]))
-        prefix_frames = prefix_frames_override or int(data_cfg.get("prefix_frames", 2000))
+        raw_prefix = prefix_frames_override if prefix_frames_override is not None else data_cfg.get("prefix_frames", None)
+        prefix_frames = int(raw_prefix) if (raw_prefix is not None and int(raw_prefix) > 0) else None
 
         # Resolve dataset directories
         root = Path(data_root or cfg.get("data_root") or Path.cwd())

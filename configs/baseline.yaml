@@ -8,7 +8,7 @@ data:
   sim_dir: data/foil/hf_dataset/numerical
   use_official_indices: true
   split_mode: trajectory_prefix
-  prefix_frames: 2000
+  prefix_frames: null
   # Used only if official index files are unavailable.
   train_fraction: 0.8
   val_fraction: 0.1
@@ -22,10 +22,10 @@ data:
   refit_real_basis: false
 
 training:
-  pretrain_epochs: 100
-  finetune_epochs: 100
+  pretrain_epochs: 1000
+  finetune_epochs: 1000
   batch_size: 16
-  patience: 10
+  patience: 20
   num_workers: 4
   seed: 42
   device: cuda
