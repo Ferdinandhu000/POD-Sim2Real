@@ -23,7 +23,7 @@ def evaluate_all_checkpoints(
     output_dir: Path | None = None,
     output_excel: str | None = None,
     device_name: str | None = None,
-    batch_size: int = 4,
+    batch_size: int = 16,
     num_workers: int = 4,
     prefix_frames_override: int | None = None,
 ) -> Path:

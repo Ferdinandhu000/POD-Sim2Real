@@ -13,7 +13,7 @@ data:
 training:
   pretrain_epochs: 100
   finetune_epochs: 100
-  batch_size: 4
+  batch_size: 16
   patience: 10
   num_workers: 4
   seed: 42
