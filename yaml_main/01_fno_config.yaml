@@ -1,0 +1,40 @@
+data:
+  use_official_indices: true
+  split_mode: official_index
+  test_mode: all
+  input_steps: 20
+  output_steps: 20
+  resolution:
+  - 64
+  - 128
+  pod_rank: 32
+  pod_fit_samples: 64
+  refit_real_basis: false
+  prefix_frames: 2000
+training:
+  pretrain_epochs: 100
+  finetune_epochs: 100
+  batch_size: 4
+  patience: 10
+  num_workers: 4
+  seed: 42
+  device: cuda
+  use_amp: true
+  ema_decay: 0.999
+  grad_clip: 1.0
+optimizer:
+  lr: 0.0002
+  weight_decay: 0.0001
+loss:
+  tke_weight: 0.05
+  use_tke: false
+  vorticity_weight: 0.1
+  use_vorticity: false
+logging:
+  use_tqdm: true
+  save_epoch_checkpoints: true
+  tensorboard: false
+model:
+  name: fno
+  width: 32
+  modes: 8

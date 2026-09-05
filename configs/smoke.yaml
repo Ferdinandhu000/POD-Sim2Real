@@ -1,0 +1,37 @@
+data:
+  # Always keep smoke execution on the small standalone Arrow files.
+  use_official_indices: false
+  split_mode: setting
+  real_dir: data/data_real
+  sim_dir: data/data_sim
+  val_settings: 1
+  input_steps: 20
+  output_steps: 20
+  resolution: [32, 64]
+  # Sparse windows keep the local smoke run short; full runs can use 20.
+  stride: 200
+  pod_rank: 8
+  refit_real_basis: false
+training:
+  pretrain_epochs: 2
+  finetune_epochs: 2
+  batch_size: 2
+  patience: 2
+  num_workers: 0
+  seed: 42
+  device: cuda
+  use_amp: true
+  ema_decay: 0.99
+  grad_clip: 1.0
+optimizer:
+  lr: 0.0002
+  weight_decay: 0.0001
+loss:
+  tke_weight: 0.05
+  use_tke: false
+logging:
+  use_tqdm: true
+  save_epoch_checkpoints: true
+  tensorboard: false
+model:
+  width: 16

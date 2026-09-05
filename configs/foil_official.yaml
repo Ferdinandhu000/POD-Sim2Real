@@ -1,0 +1,45 @@
+data:
+  # With --data-root /path/to/project, this resolves automatically as
+  # data/foil/hf_dataset/{real,numerical}. Do not set data_real/data_sim here.
+  use_official_indices: true
+  split_mode: official_index
+  # Official benchmark subsets: all, seen, in_dist, out_dist, unseen.
+  # "all" evaluates every entry in test_index_real.json.
+  test_mode: all
+  input_steps: 20
+  output_steps: 20
+  resolution: [64, 128]
+  pod_rank: 32
+  pod_fit_samples: 64
+  refit_real_basis: false
+  # To train on a fixed number of frames (e.g. 2000) from each trajectory:
+  prefix_frames: 2000
+
+training:
+  pretrain_epochs: 100
+  finetune_epochs: 100
+  batch_size: 4
+  patience: 10
+  num_workers: 4
+  seed: 42
+  device: cuda
+  use_amp: true
+  ema_decay: 0.999
+  grad_clip: 1.0
+
+optimizer:
+  lr: 0.0002
+  weight_decay: 0.0001
+
+loss:
+  tke_weight: 0.05
+  use_tke: false
+
+
+logging:
+  use_tqdm: true
+  save_epoch_checkpoints: true
+  tensorboard: false
+
+model:
+  width: 32

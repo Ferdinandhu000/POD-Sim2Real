@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pod-sim2real"
+version = "0.1.0"
+description = "Sim-to-real flow forecasting baselines for RealPDEBench foil data"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pyarrow>=14",
+    "datasets>=2.16",
+    "PyYAML>=6",
+    "tqdm>=4.65",
+    "torch>=2.1",
+    "matplotlib>=3.7",
+    "opencv-python>=4.8",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+pod-sim2real-train = "pod_sim2real.training.train:main"
+pod-sim2real-eval = "pod_sim2real.training.evaluate:main"
+pod-sim2real-audit = "pod_sim2real.visualization.audit_dataset:main"
+pod-sim2real-videos = "pod_sim2real.visualization.render_pairs:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["pod_sim2real*"]

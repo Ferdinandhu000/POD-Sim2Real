@@ -1,0 +1,26 @@
+# ==============================================================================
+# PyTorch: Recommend installing according to your server CUDA version first:
+# e.g. pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# ==============================================================================
+torch>=2.1
+torchvision>=0.16
+
+# Data Processing & Storage
+numpy>=1.24
+scipy>=1.10
+pyarrow>=14
+datasets>=2.16
+PyYAML>=6
+
+# Visualization & Reporting
+matplotlib>=3.7
+opencv-python>=4.8
+pandas>=2.0
+openpyxl>=3.1
+
+# Progress & Monitoring
+tqdm>=4.65
+tensorboard>=2.14
+
+# Testing
+pytest>=7

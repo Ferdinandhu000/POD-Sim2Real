@@ -1,0 +1,43 @@
+# 1. 实验运行产物与权重
+artifacts/
+best_checkpoints/
+runs/
+*.pt
+*.pth
+*.npz
+*.ckpt
+
+# 2. 数据文件
+data/
+*.arrow
+*.h5
+*.npy
+
+# 3. 评测输出表格与临时日志
+evaluation_results_*.xlsx
+evaluation_results_*.json
+*.log
+
+# 4. Python 缓存与构建产物
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+build/
+dist/
+*.egg-info/
+src/*.egg-info/
+
+# 5. 外部开源参考代码（模型已全部纯原生内置于 src/pod_sim2real，无需上传）
+src/AFNO-transformer-master/
+src/Transolver-main/
+src/iTransformer-main/
+
+# 6. IDE与虚拟环境
+.idea/
+.vscode/
+.env
+venv/
+env/
+.DS_Store

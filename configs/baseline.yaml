@@ -1,0 +1,54 @@
+output_dir: artifacts/baseline_first_third
+
+data:
+  # Full RealPDEBench Foil layout on the server. Official index files assign
+  # complete trajectory files to train/val/test; this config only truncates
+  # each assigned trajectory to its first third.
+  real_dir: data/foil/hf_dataset/real
+  sim_dir: data/foil/hf_dataset/numerical
+  use_official_indices: true
+  split_mode: trajectory_prefix
+  prefix_frames: 2000
+  # Used only if official index files are unavailable.
+  train_fraction: 0.8
+  val_fraction: 0.1
+  input_steps: 20
+  output_steps: 20
+  # Train at 32x64 by default for a practical baseline. Set to [128, 256]
+  # when GPU memory permits; the source trajectories remain full resolution.
+  resolution: [64, 128]
+  # One window every 20 frames. Increase to 1 for maximum sample density.
+  stride: 20
+  refit_real_basis: false
+
+training:
+  pretrain_epochs: 100
+  finetune_epochs: 100
+  batch_size: 4
+  patience: 10
+  num_workers: 4
+  seed: 42
+  device: cuda
+  use_amp: true
+  ema_decay: 0.999
+  grad_clip: 1.0
+
+optimizer:
+  name: adamw
+  lr: 0.0002
+  weight_decay: 0.0001
+
+loss:
+  baseline: mse
+  tke_weight: 0.05
+  use_tke: false
+
+
+logging:
+  use_tqdm: true
+  save_epoch_checkpoints: false
+  tensorboard: false
+
+model:
+  name: unet
+  width: 32
