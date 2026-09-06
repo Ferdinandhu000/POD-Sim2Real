@@ -13,7 +13,7 @@ data:
   pod_fit_samples: 64
   refit_real_basis: false
   # To train on a fixed number of frames (e.g. 2000) from each trajectory:
-  prefix_frames: 0.5
+  prefix_frames: null
 
 training:
   pretrain_epochs: 1000

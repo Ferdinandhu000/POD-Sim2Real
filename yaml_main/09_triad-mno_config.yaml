@@ -10,7 +10,7 @@ data:
   pod_rank: 64
   pod_fit_samples: 64
   refit_real_basis: false
-  prefix_frames: 0.5
+  prefix_frames: null
 training:
   pretrain_epochs: 1000
   finetune_epochs: 1000
