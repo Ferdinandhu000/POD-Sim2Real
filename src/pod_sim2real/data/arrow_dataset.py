@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 import json
@@ -162,6 +163,7 @@ class OfficialArrowWindowDataset(Dataset):
         index_entries: list[dict[str, int | str]] | None = None,
         prefix_frames: int | None = None,
         cache_trajectories: bool = True,
+        max_cache_trajectories: int = 8,
     ):
         from datasets import load_from_disk
         self.arrow_dir = Path(arrow_dir)
@@ -221,15 +223,12 @@ class OfficialArrowWindowDataset(Dataset):
             and "v" in self._pa_table.column_names
         )
 
-        # In-memory trajectory cache: caches downsampled (T, res_h, res_w) arrays in RAM.
-        # Eliminates repeated disk I/O and GB-scale deserialization for thousands of sliding windows.
+        # In-memory bounded LRU trajectory cache: caches downsampled (T, res_h, res_w) arrays in RAM on demand.
+        # Hard-capped at max_cache_trajectories (e.g. 8 * ~65 MB = ~520 MB max).
+        # Lazy on-demand loading avoids multi-gigabyte memory spikes at initialization.
         self.cache_trajectories = cache_trajectories
-        self._traj_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-        if self.cache_trajectories:
-            unique_rows = {self.row_by_id[str(e["sim_id"])] for e in self.valid_entries}
-            if len(unique_rows) <= 128:
-                for r_idx in unique_rows:
-                    self._get_trajectory(r_idx)
+        self.max_cache_trajectories = max(1, int(max_cache_trajectories))
+        self._traj_cache: OrderedDict[int, tuple[np.ndarray, np.ndarray]] = OrderedDict()
 
     @staticmethod
     def _decode(raw: bytes, shape: tuple[int, ...]) -> np.ndarray:
@@ -273,16 +272,21 @@ class OfficialArrowWindowDataset(Dataset):
         # Fallback to standard row access if arrow buffer slicing is unavailable
         row = self.table[row_idx]
         raw = row[channel_name]
-        return self._decode(raw, full_shape)[start:stop, ::sh, ::sw]
+        arr = self._decode(raw, full_shape)[start:stop, ::sh, ::sw]
+        del row, raw
+        return arr
 
     def _get_trajectory(self, row_idx: int) -> tuple[np.ndarray, np.ndarray]:
         if row_idx in self._traj_cache:
+            self._traj_cache.move_to_end(row_idx)
             return self._traj_cache[row_idx]
         full_shape = self.shapes_by_row[row_idx]
         sh = full_shape[1] // int(self.resolution[0])
         sw = full_shape[2] // int(self.resolution[1])
         u = self._slice_field("u", row_idx, full_shape, 0, full_shape[0], sh, sw)
         v = self._slice_field("v", row_idx, full_shape, 0, full_shape[0], sh, sw)
+        while len(self._traj_cache) >= self.max_cache_trajectories:
+            self._traj_cache.popitem(last=False)
         self._traj_cache[row_idx] = (u, v)
         return u, v
 
