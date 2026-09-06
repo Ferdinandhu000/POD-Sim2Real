@@ -45,8 +45,9 @@ def compute_loss(
     use_tke: bool | None = None,
     vorticity_weight: float = 0.1,
     use_vorticity: bool | None = None,
+    return_scalars: bool = True,
     **kwargs,
-) -> tuple[torch.Tensor, dict[str, float]]:
+) -> tuple[torch.Tensor, dict[str, float | torch.Tensor]]:
     """Compute training loss.
     
     Base field loss is standard MSE.
@@ -67,11 +68,20 @@ def compute_loss(
     if enable_vort:
         total_loss = total_loss + vorticity_weight * vort
 
+    if return_scalars:
+        return total_loss, {
+            "loss": float(total_loss.detach()),
+            "mse": float(mse.detach()),
+            "tke": float(tke.detach()),
+            "vorticity": float(vort.detach()),
+        }
+    # Keep diagnostics on the current device during training. Converting these
+    # values to Python floats here would synchronize the CUDA stream every step.
     return total_loss, {
-        "loss": float(total_loss.detach()),
-        "mse": float(mse.detach()),
-        "tke": float(tke.detach()),
-        "vorticity": float(vort.detach()),
+        "loss": total_loss.detach(),
+        "mse": mse.detach(),
+        "tke": tke.detach(),
+        "vorticity": vort.detach(),
     }
 
 @torch.no_grad()
@@ -116,4 +126,3 @@ def compute_metrics(pred: torch.Tensor, target: torch.Tensor) -> dict[str, float
         metrics["vorticity_mse"] = float(omega_diff.square().mean().item())
         metrics["vorticity_rel_l2"] = float((torch.norm(omega_diff.float()) / (torch.norm(omega_tgt.float()) + 1e-8)).item())
     return metrics
-

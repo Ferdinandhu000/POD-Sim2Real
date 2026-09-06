@@ -16,6 +16,21 @@ def _save(path, payload):
     torch.save(payload, path)
 
 
+def _loader_kwargs(config, device, *, shuffle):
+    """Build DataLoader options without enabling invalid worker options at 0 workers."""
+    workers = max(0, int(config.get("num_workers", 0)))
+    kwargs = {
+        "batch_size": int(config["batch_size"]),
+        "shuffle": shuffle,
+        "num_workers": workers,
+        "pin_memory": device.type == "cuda",
+    }
+    if workers > 0:
+        kwargs["persistent_workers"] = bool(config.get("persistent_workers", True))
+        kwargs["prefetch_factor"] = max(1, int(config.get("prefetch_factor", 1)))
+    return kwargs
+
+
 def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initial=None):
     stage_dir = Path(stage_dir)
     (stage_dir / "logs").mkdir(parents=True, exist_ok=True)
@@ -23,9 +38,8 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
     if initial is not None:
         model.load_state_dict(initial, strict=False)
     model.to(device)
-    pin_memory = (device.type == "cuda")
-    loader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True, num_workers=config["num_workers"], pin_memory=pin_memory)
-    val_loader = DataLoader(val_ds, batch_size=config["batch_size"], shuffle=False, num_workers=config["num_workers"], pin_memory=pin_memory)
+    loader = DataLoader(train_ds, **_loader_kwargs(config, device, shuffle=True))
+    val_loader = DataLoader(val_ds, **_loader_kwargs(config, device, shuffle=False))
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable_params, lr=config["lr"], weight_decay=config["weight_decay"])
     best = float("inf")
@@ -66,10 +80,11 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
     for epoch in range(start_epoch, epochs + 1):
         start = time.perf_counter()
         model.train()
-        totals = {"loss": 0.0, "mse": 0.0, "tke": 0.0}
+        totals = {key: torch.zeros((), device=device) for key in ("loss", "mse", "tke")}
         bar = tqdm(loader, desc=f"{stage} Epoch {epoch:03d}/{epochs:03d} train", leave=False)
         for x, y, _ in bar:
-            x, y = x.to(device), y.to(device)
+            x = x.to(device, non_blocking=bool(config.get("non_blocking", True)))
+            y = y.to(device, non_blocking=bool(config.get("non_blocking", True)))
             opt.zero_grad(set_to_none=True)
             with _autocast():
                 pred = model(x)
@@ -82,6 +97,7 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
                     use_tke=config.get("use_tke", None),
                     vorticity_weight=config.get("vorticity_weight", 0.1),
                     use_vorticity=config.get("use_vorticity", None),
+                    return_scalars=False,
                 )
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -89,17 +105,20 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip"])
             scaler.step(opt)
             scaler.update()
-            totals["loss"] += loss.item()
-            totals["mse"] += float(parts["mse"])
-            totals["tke"] += float(parts["tke"])
-            bar.set_postfix(loss=f"{loss.item():.4g}", mse=f"{float(parts['mse']):.4g}")
+            totals["loss"] += parts["loss"]
+            totals["mse"] += parts["mse"]
+            totals["tke"] += parts["tke"]
+            # Avoid a CUDA synchronization on every iteration just to update tqdm.
+            if config.get("progress_sync", False):
+                bar.set_postfix(loss=f"{parts['loss'].item():.4g}", mse=f"{parts['mse'].item():.4g}")
 
         val_sum = 0.0
         n = 0
         model.eval()
         with torch.inference_mode():
             for x, y, _ in tqdm(val_loader, desc=f"{stage} Epoch {epoch:03d}/{epochs:03d} val", leave=False):
-                x, y = x.to(device), y.to(device)
+                x = x.to(device, non_blocking=bool(config.get("non_blocking", True)))
+                y = y.to(device, non_blocking=bool(config.get("non_blocking", True)))
                 with _autocast():
                     pred = model(x)
                 val_sum += torch.nn.functional.mse_loss(pred.float(), y.float()).item() * len(x)
@@ -109,9 +128,9 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
         metrics = {
             "stage": stage,
             "epoch": epoch,
-            "train_loss": totals["loss"] / steps,
-            "train_mse": totals["mse"] / steps,
-            "tke_loss": totals["tke"] / steps,
+            "train_loss": float((totals["loss"] / steps).item()),
+            "train_mse": float((totals["mse"] / steps).item()),
+            "tke_loss": float((totals["tke"] / steps).item()),
             "val_loss": val,
             "lr": opt.param_groups[0]["lr"],
             "epoch_seconds": time.perf_counter() - start,
@@ -170,7 +189,16 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0) -> dict[
     - rel_l2
     - u_mse, v_mse, u_rmse, v_rmse, u_mae, v_mae, u_rel_l2, v_rel_l2
     """
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    workers = max(0, int(num_workers))
+    eval_loader_kwargs = {
+        "batch_size": batch_size,
+        "shuffle": False,
+        "num_workers": workers,
+        "pin_memory": device.type == "cuda",
+    }
+    if workers > 0:
+        eval_loader_kwargs.update({"persistent_workers": True, "prefetch_factor": 1})
+    loader = DataLoader(dataset, **eval_loader_kwargs)
     model.to(device).eval()
 
     total_sq_err = 0.0
@@ -195,7 +223,8 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0) -> dict[
 
     with torch.inference_mode():
         for x, y, _ in loader:
-            x, y = x.to(device), y.to(device)
+            x = x.to(device, non_blocking=device.type == "cuda")
+            y = y.to(device, non_blocking=device.type == "cuda")
             pred = model(x)
             diff = pred.float() - y.float()
 
@@ -263,4 +292,3 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0) -> dict[
             "vorticity_rel_l2": math.sqrt(vort_sq_err) / (math.sqrt(vort_tgt_sq) + 1e-8),
         })
     return res
-

@@ -16,7 +16,7 @@ training:
   finetune_epochs: 1000
   batch_size: 128
   patience: 20
-  num_workers: 0
+  num_workers: 4
   seed: 42
   device: cuda
   use_amp: true

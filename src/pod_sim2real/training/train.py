@@ -52,7 +52,20 @@ def _resolve_data_layout(root: Path, data: dict) -> tuple[Path, Path, Path | Non
     raise FileNotFoundError(f"could not find Arrow data under {root}")
 
 
-def _official_dataset(arrow_dir, index_root, suffix, split, input_steps, output_steps, resolution, test_mode="all", prefix_frames=None):
+def _official_dataset(
+    arrow_dir,
+    index_root,
+    suffix,
+    split,
+    input_steps,
+    output_steps,
+    resolution,
+    test_mode="all",
+    prefix_frames=None,
+    *,
+    cache_trajectories=True,
+    max_cache_trajectories=8,
+):
     mode = test_mode if split in {"val", "test"} else "all"
     return OfficialArrowWindowDataset(
         arrow_dir,
@@ -63,6 +76,8 @@ def _official_dataset(arrow_dir, index_root, suffix, split, input_steps, output_
         test_mode=mode,
         metadata_root=index_root.parent,
         prefix_frames=prefix_frames,
+        cache_trajectories=cache_trajectories,
+        max_cache_trajectories=max_cache_trajectories,
     )
 
 
@@ -98,6 +113,10 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
     stride = int(args.stride or data.get("stride", 20))
     batch = int(args.batch_size or training.get("batch_size", 2))
     workers = int(args.num_workers if args.num_workers is not None else training.get("num_workers", 0))
+    # Each worker owns a separate dataset/cache. For random windows, duplicating
+    # full-trajectory caches across workers usually costs more IO/RAM than it saves.
+    cache_trajectories = bool(data.get("cache_trajectories", workers <= 1))
+    max_cache_trajectories = max(1, int(data.get("max_cache_trajectories", 8)))
     epochs = int(args.epochs or training.get("pretrain_epochs", 2))
     input_steps, output_steps = int(data.get("input_steps", 20)), int(data.get("output_steps", 20))
     raw_prefix = args.prefix_frames
@@ -115,7 +134,20 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
 
     out.mkdir(parents=True, exist_ok=True)
     logger = make_logger(out / "logs")
-    logger.info("run_name=%s model=%s device=%s resolution=%s prefix_frames=%s real_dir=%s sim_dir=%s", run_name, model_name, device, resolution, prefix_frames or "full", real_dir, sim_dir)
+    logger.info(
+        "run_name=%s model=%s device=%s resolution=%s batch_size=%d num_workers=%d cache_trajectories=%s "
+        "prefix_frames=%s real_dir=%s sim_dir=%s",
+        run_name,
+        model_name,
+        device,
+        resolution,
+        batch,
+        workers,
+        cache_trajectories,
+        prefix_frames or "full",
+        real_dir,
+        sim_dir,
+    )
 
     official = bool(index_root and data.get("use_official_indices", False))
     bases = None
@@ -141,8 +173,34 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
             train_fraction=float(data.get("train_fraction", .8)),
             val_fraction=float(data.get("val_fraction", .1)),
         )
-        sim_ds = {s: OfficialArrowWindowDataset(sim_dir, None, input_steps, output_steps, resolution, index_entries=sim_ds_entries[s], prefix_frames=prefix_frames) for s in ("train", "val", "test")}
-        real_ds = {s: OfficialArrowWindowDataset(real_dir, None, input_steps, output_steps, resolution, index_entries=real_ds_entries[s], prefix_frames=prefix_frames) for s in ("train", "val", "test")}
+        sim_ds = {
+            s: OfficialArrowWindowDataset(
+                sim_dir,
+                None,
+                input_steps,
+                output_steps,
+                resolution,
+                index_entries=sim_ds_entries[s],
+                prefix_frames=prefix_frames,
+                cache_trajectories=cache_trajectories,
+                max_cache_trajectories=max_cache_trajectories,
+            )
+            for s in ("train", "val", "test")
+        }
+        real_ds = {
+            s: OfficialArrowWindowDataset(
+                real_dir,
+                None,
+                input_steps,
+                output_steps,
+                resolution,
+                index_entries=real_ds_entries[s],
+                prefix_frames=prefix_frames,
+                cache_trajectories=cache_trajectories,
+                max_cache_trajectories=max_cache_trajectories,
+            )
+            for s in ("train", "val", "test")
+        }
         if not sim_ids:
             sim_ids = {s: sorted({str(item["sim_id"]) for item in sim_ds_entries[s]}) for s in ("train", "val", "test")}
         if not real_ids:
@@ -160,8 +218,38 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         if model_name.startswith("pod-") or "triad" in model_name:
             bases = fit_pod_bases_from_dataset(sim_ds["train"], int(data.get("pod_rank", 32)), max_samples=int(data.get("pod_fit_samples", 64)))
     elif official and split_mode == "official_index":
-        sim_ds = {s: _official_dataset(sim_dir, index_root, "numerical", s, input_steps, output_steps, resolution, test_mode, prefix_frames=prefix_frames) for s in ("train", "val", "test")}
-        real_ds = {s: _official_dataset(real_dir, index_root, "real", s, input_steps, output_steps, resolution, test_mode, prefix_frames=prefix_frames) for s in ("train", "val", "test")}
+        sim_ds = {
+            s: _official_dataset(
+                sim_dir,
+                index_root,
+                "numerical",
+                s,
+                input_steps,
+                output_steps,
+                resolution,
+                test_mode,
+                prefix_frames=prefix_frames,
+                cache_trajectories=cache_trajectories,
+                max_cache_trajectories=max_cache_trajectories,
+            )
+            for s in ("train", "val", "test")
+        }
+        real_ds = {
+            s: _official_dataset(
+                real_dir,
+                index_root,
+                "real",
+                s,
+                input_steps,
+                output_steps,
+                resolution,
+                test_mode,
+                prefix_frames=prefix_frames,
+                cache_trajectories=cache_trajectories,
+                max_cache_trajectories=max_cache_trajectories,
+            )
+            for s in ("train", "val", "test")
+        }
         manifest = {"split_mode": "official_index", "prefix_frames": prefix_frames, "test_mode": test_mode, "index_root": str(index_root), "real_dir": str(real_dir), "sim_dir": str(sim_dir), "sim_windows": {k: len(v) for k, v in sim_ds.items()}, "real_windows": {k: len(v) for k, v in real_ds.items()}, "resolution": list(resolution), "stride": stride}
         if model_name.startswith("pod-") or "triad" in model_name:
             bases = fit_pod_bases_from_dataset(sim_ds["train"], int(data.get("pod_rank", 32)), max_samples=int(data.get("pod_fit_samples", 64)))
@@ -213,6 +301,10 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
             "model": model_name,
             "batch_size": batch,
             "num_workers": workers,
+            "persistent_workers": bool(training.get("persistent_workers", workers > 0)),
+            "prefetch_factor": max(1, int(training.get("prefetch_factor", 1))),
+            "non_blocking": bool(training.get("non_blocking", True)),
+            "progress_sync": bool(training.get("progress_sync", False)),
             "epochs": stage_epochs,
             "patience": int(training.get("patience", 10)),
             "lr": float(opt.get("lr", 2e-4)),
