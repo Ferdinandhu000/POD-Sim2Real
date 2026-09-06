@@ -12,6 +12,11 @@ runs/
 *.arrow
 *.h5
 *.npy
+tensor_cache/
+tensor_cache_*/
+tensors/
+data/**/tensor_cache*/
+data/**/tensors*/
 
 # 3. 评测输出表格与临时日志
 evaluation_results_*.xlsx

@@ -11,7 +11,13 @@ import numpy as np
 import torch
 import yaml
 
-from ..data import OfficialArrowWindowDataset, build_trajectory_prefix_entries, discover_trajectories
+from ..data import (
+    OfficialArrowWindowDataset,
+    PrecomputedTrajectoryDataset,
+    build_trajectory_prefix_entries,
+    discover_trajectories,
+    preprocess_domain,
+)
 from ..data.arrow_dataset import _load_index_trajectory_ids
 from ..data.splits import split_settings
 from ..model import build_model, fit_pod_bases, fit_pod_bases_from_dataset
@@ -52,6 +58,64 @@ def _resolve_data_layout(root: Path, data: dict) -> tuple[Path, Path, Path | Non
     raise FileNotFoundError(f"could not find Arrow data under {root}")
 
 
+def _build_dataset(
+    arrow_dir,
+    index_root,
+    suffix,
+    split,
+    input_steps,
+    output_steps,
+    resolution,
+    test_mode="all",
+    prefix_frames=None,
+    *,
+    index_entries=None,
+    tensor_dir=None,
+    cache_trajectories=True,
+    max_cache_trajectories=8,
+    in_memory=True,
+):
+    if tensor_dir is not None and tensor_dir.exists() and list(tensor_dir.glob("*.pt")):
+        idx_file = (index_root / f"{split}_index_{suffix}.json") if index_root and suffix else None
+        return PrecomputedTrajectoryDataset(
+            tensor_dir=tensor_dir,
+            index_file=idx_file,
+            index_entries=index_entries,
+            input_steps=input_steps,
+            output_steps=output_steps,
+            resolution=resolution,
+            test_mode=test_mode if split in {"val", "test"} else "all",
+            metadata_root=index_root.parent if index_root else None,
+            prefix_frames=prefix_frames,
+            in_memory=in_memory,
+        )
+    mode = test_mode if split in {"val", "test"} else "all"
+    if index_entries is not None:
+        return OfficialArrowWindowDataset(
+            arrow_dir,
+            None,
+            input_steps,
+            output_steps,
+            resolution,
+            index_entries=index_entries,
+            prefix_frames=prefix_frames,
+            cache_trajectories=cache_trajectories,
+            max_cache_trajectories=max_cache_trajectories,
+        )
+    return OfficialArrowWindowDataset(
+        arrow_dir,
+        index_root / f"{split}_index_{suffix}.json" if index_root else None,
+        input_steps,
+        output_steps,
+        resolution,
+        test_mode=mode,
+        metadata_root=index_root.parent if index_root else None,
+        prefix_frames=prefix_frames,
+        cache_trajectories=cache_trajectories,
+        max_cache_trajectories=max_cache_trajectories,
+    )
+
+
 def _official_dataset(
     arrow_dir,
     index_root,
@@ -63,21 +127,25 @@ def _official_dataset(
     test_mode="all",
     prefix_frames=None,
     *,
+    tensor_dir=None,
     cache_trajectories=True,
     max_cache_trajectories=8,
+    in_memory=True,
 ):
-    mode = test_mode if split in {"val", "test"} else "all"
-    return OfficialArrowWindowDataset(
-        arrow_dir,
-        index_root / f"{split}_index_{suffix}.json",
-        input_steps,
-        output_steps,
-        resolution,
-        test_mode=mode,
-        metadata_root=index_root.parent,
+    return _build_dataset(
+        arrow_dir=arrow_dir,
+        index_root=index_root,
+        suffix=suffix,
+        split=split,
+        input_steps=input_steps,
+        output_steps=output_steps,
+        resolution=resolution,
+        test_mode=test_mode,
         prefix_frames=prefix_frames,
+        tensor_dir=tensor_dir,
         cache_trajectories=cache_trajectories,
         max_cache_trajectories=max_cache_trajectories,
+        in_memory=in_memory,
     )
 
 
@@ -149,6 +217,31 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         sim_dir,
     )
 
+    use_tensor_cache = bool(data.get("use_tensor_cache", True))
+    reload_tensors = bool(data.get("reload_tensors", False))
+    in_memory = bool(data.get("in_memory", True))
+
+    tensor_root_cfg = data.get("tensor_dir")
+    if tensor_root_cfg:
+        tensor_root = Path(tensor_root_cfg)
+    else:
+        parent = real_dir.parent.parent if real_dir.parent.name in ("hf_dataset", "real") else real_dir.parent
+        tensor_root = parent / f"tensor_cache_{resolution[0]}x{resolution[1]}"
+
+    real_tensor_dir = tensor_root / "real"
+    sim_tensor_dir = tensor_root / "numerical"
+
+    if use_tensor_cache:
+        has_real_pt = real_tensor_dir.exists() and bool(list(real_tensor_dir.glob("*.pt")))
+        has_sim_pt = sim_tensor_dir.exists() and bool(list(sim_tensor_dir.glob("*.pt")))
+        if reload_tensors or not (has_real_pt and has_sim_pt):
+            logger.info("Preparing tensor cache at %s (reload_tensors=%s) ...", tensor_root, reload_tensors)
+            import os
+            num_proc = max(1, (os.cpu_count() or 4) // 2)
+            preprocess_domain(real_dir, real_tensor_dir, resolution, prefix_frames=None, overwrite=reload_tensors, num_workers=num_proc, desc="Precompute Real Tensors")
+            preprocess_domain(sim_dir, sim_tensor_dir, resolution, prefix_frames=None, overwrite=reload_tensors, num_workers=num_proc, desc="Precompute Sim Tensors")
+        logger.info("Using fast tensor cache: real=%s sim=%s (in_memory=%s)", real_tensor_dir, sim_tensor_dir, in_memory)
+
     official = bool(index_root and data.get("use_official_indices", False))
     bases = None
     test_mode = args.test_mode or data.get("test_mode", "all")
@@ -174,30 +267,38 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
             val_fraction=float(data.get("val_fraction", .1)),
         )
         sim_ds = {
-            s: OfficialArrowWindowDataset(
-                sim_dir,
-                None,
-                input_steps,
-                output_steps,
-                resolution,
+            s: _build_dataset(
+                arrow_dir=sim_dir,
+                index_root=None,
+                suffix=None,
+                split=s,
+                input_steps=input_steps,
+                output_steps=output_steps,
+                resolution=resolution,
                 index_entries=sim_ds_entries[s],
                 prefix_frames=prefix_frames,
+                tensor_dir=sim_tensor_dir if use_tensor_cache else None,
                 cache_trajectories=cache_trajectories,
                 max_cache_trajectories=max_cache_trajectories,
+                in_memory=in_memory,
             )
             for s in ("train", "val", "test")
         }
         real_ds = {
-            s: OfficialArrowWindowDataset(
-                real_dir,
-                None,
-                input_steps,
-                output_steps,
-                resolution,
+            s: _build_dataset(
+                arrow_dir=real_dir,
+                index_root=None,
+                suffix=None,
+                split=s,
+                input_steps=input_steps,
+                output_steps=output_steps,
+                resolution=resolution,
                 index_entries=real_ds_entries[s],
                 prefix_frames=prefix_frames,
+                tensor_dir=real_tensor_dir if use_tensor_cache else None,
                 cache_trajectories=cache_trajectories,
                 max_cache_trajectories=max_cache_trajectories,
+                in_memory=in_memory,
             )
             for s in ("train", "val", "test")
         }
@@ -229,8 +330,10 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
                 resolution,
                 test_mode,
                 prefix_frames=prefix_frames,
+                tensor_dir=sim_tensor_dir if use_tensor_cache else None,
                 cache_trajectories=cache_trajectories,
                 max_cache_trajectories=max_cache_trajectories,
+                in_memory=in_memory,
             )
             for s in ("train", "val", "test")
         }
@@ -245,8 +348,10 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
                 resolution,
                 test_mode,
                 prefix_frames=prefix_frames,
+                tensor_dir=real_tensor_dir if use_tensor_cache else None,
                 cache_trajectories=cache_trajectories,
                 max_cache_trajectories=max_cache_trajectories,
+                in_memory=in_memory,
             )
             for s in ("train", "val", "test")
         }
@@ -387,7 +492,17 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
             for sub in subsets:
                 try:
                     sub_ds = _official_dataset(
-                        real_dir, index_root, "real", "test", input_steps, output_steps, resolution, test_mode=sub, prefix_frames=prefix_frames
+                        real_dir,
+                        index_root,
+                        "real",
+                        "test",
+                        input_steps,
+                        output_steps,
+                        resolution,
+                        test_mode=sub,
+                        prefix_frames=prefix_frames,
+                        tensor_dir=real_tensor_dir if use_tensor_cache else None,
+                        in_memory=in_memory,
                     )
                     m = evaluate_model(test_model, sub_ds, device, batch, workers)
                     m["windows"] = len(sub_ds)
