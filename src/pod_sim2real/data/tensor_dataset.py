@@ -13,16 +13,24 @@ class PrecomputedTrajectoryDataset(Dataset):
     """Ultra-fast, zero-overhead Dataset that loads pre-downsampled trajectory tensors (.pt).
 
     Features:
-    1. In-Memory Shared Tensors (in_memory=True):
-       All trajectories for the current split are loaded once into RAM at startup
-       and registered with .share_memory_(). PyTorch DataLoader workers access
-       the tensors with ZERO disk I/O, ZERO IPC duplication, and ZERO deserialization overhead.
-    2. Zero-Copy Slicing:
+    1. Memory-Mapped Loading (mmap=True, default):
+       Tensors are mapped into virtual address space with 0 MB physical RAM upfront.
+       The OS kernel page cache loads and caches pages on-demand without memory duplication.
+    2. Process-Level Global Cache:
+       Trajetory tensors are registered globally across dataset instances (train, val, test,
+       and test subsets), guaranteeing that each trajectory file is only opened/loaded ONCE.
+    3. Zero-Copy Slicing:
        __getitem__ performs pure PyTorch pointer slicing (window = traj[start : start + horizon]),
        taking microseconds per batch.
-    3. Seamless compatibility with OfficialArrowWindowDataset:
+    4. Seamless compatibility with OfficialArrowWindowDataset:
        Handles test_mode, prefix_frames, official index files, and trajectory prefix splits.
     """
+
+    _GLOBAL_TRAJECTORY_CACHE: dict[tuple[Path, int | None, bool], torch.Tensor] = {}
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._GLOBAL_TRAJECTORY_CACHE.clear()
 
     def __init__(
         self,
@@ -36,8 +44,8 @@ class PrecomputedTrajectoryDataset(Dataset):
         metadata_root: str | Path | None = None,
         index_entries: list[dict[str, int | str]] | None = None,
         prefix_frames: int | float | None = None,
-        in_memory: bool = True,
-        mmap: bool = False,
+        in_memory: bool = False,
+        mmap: bool = True,
     ):
         super().__init__()
         self.tensor_dir = Path(tensor_dir)
@@ -99,45 +107,43 @@ class PrecomputedTrajectoryDataset(Dataset):
         # Identify which trajectories are actually referenced in this split
         needed_ids = {str(e["sim_id"]) for e in self.entries if str(e["sim_id"]) in self.file_by_id}
 
-        # 4. Load trajectories
+        # 4. Load trajectories (cached globally across all dataset instances to prevent OOM)
         self.trajectories: dict[str, torch.Tensor] = {}
         self.shapes_by_id: dict[str, tuple[int, ...]] = {}
 
         for sim_id in sorted(needed_ids):
             pt_path = self.file_by_id[sim_id]
-            if self.in_memory:
-                # Load fully into CPU RAM
-                tensor = torch.load(pt_path, weights_only=True, map_location="cpu")
-                if not isinstance(tensor, torch.Tensor):
-                    tensor = torch.from_numpy(np.asarray(tensor))
-                tensor = tensor.float().contiguous()
-                # Apply prefix_frames slice if needed to reduce RAM usage
-                if prefix_frames is not None:
-                    total_t = tensor.shape[0]
-                    prefix_val = float(prefix_frames)
-                    if 0.0 < prefix_val <= 1.0:
-                        max_frames = int(total_t * prefix_val)
-                    else:
-                        max_frames = min(total_t, int(prefix_val))
-                    tensor = tensor[:max_frames].contiguous()
-                # Enable shared memory across DataLoader workers
-                tensor.share_memory_()
-                self.trajectories[sim_id] = tensor
-                self.shapes_by_id[sim_id] = tuple(tensor.shape)
+            cache_key = (pt_path, prefix_frames, self.in_memory)
+
+            if cache_key in self._GLOBAL_TRAJECTORY_CACHE:
+                tensor = self._GLOBAL_TRAJECTORY_CACHE[cache_key]
             else:
-                # Read metadata/shape only for lazy loading
-                if hasattr(torch, "load") and self.mmap:
-                    try:
-                        tensor = torch.load(pt_path, weights_only=True, map_location="cpu", mmap=True)
-                        self.trajectories[sim_id] = tensor
-                        self.shapes_by_id[sim_id] = tuple(tensor.shape)
-                    except Exception:
-                        tensor = torch.load(pt_path, weights_only=True, map_location="cpu")
-                        self.shapes_by_id[sim_id] = tuple(tensor.shape)
-                else:
-                    # Fallback
+                if self.in_memory:
+                    # Load fully into CPU RAM (only 1 copy globally)
                     tensor = torch.load(pt_path, weights_only=True, map_location="cpu")
-                    self.shapes_by_id[sim_id] = tuple(tensor.shape)
+                    if not isinstance(tensor, torch.Tensor):
+                        tensor = torch.from_numpy(np.asarray(tensor))
+                    tensor = tensor.float().contiguous()
+                    if prefix_frames is not None:
+                        total_t = tensor.shape[0]
+                        prefix_val = float(prefix_frames)
+                        max_frames = int(total_t * prefix_val) if 0.0 < prefix_val <= 1.0 else min(total_t, int(prefix_val))
+                        tensor = tensor[:max_frames].contiguous()
+                    tensor.share_memory_()
+                else:
+                    # Ultra-low RAM mmap: 0 bytes physical RAM upfront.
+                    # Slicing is ~40 microseconds. The OS page cache automatically manages
+                    # memory pages and frees them cleanly under memory pressure.
+                    tensor = torch.load(pt_path, weights_only=True, map_location="cpu", mmap=True)
+                    if prefix_frames is not None:
+                        total_t = tensor.shape[0]
+                        prefix_val = float(prefix_frames)
+                        max_frames = int(total_t * prefix_val) if 0.0 < prefix_val <= 1.0 else min(total_t, int(prefix_val))
+                        tensor = tensor[:max_frames]
+                self._GLOBAL_TRAJECTORY_CACHE[cache_key] = tensor
+
+            self.trajectories[sim_id] = tensor
+            self.shapes_by_id[sim_id] = tuple(tensor.shape)
 
         # 5. Filter valid entries based on horizon and prefix bounds
         self.valid_entries: list[dict[str, int | str]] = []
@@ -163,12 +169,14 @@ class PrecomputedTrajectoryDataset(Dataset):
         start = int(entry["time_id"])
         stop = start + self.horizon
 
-        if self.in_memory or sim_id in self.trajectories:
+        if sim_id in self.trajectories:
             traj = self.trajectories[sim_id]
         else:
-            # Lazy load from disk
             pt_path = self.file_by_id[sim_id]
-            traj = torch.load(pt_path, weights_only=True, map_location="cpu").float()
+            if self.mmap:
+                traj = torch.load(pt_path, weights_only=True, map_location="cpu", mmap=True)
+            else:
+                traj = torch.load(pt_path, weights_only=True, map_location="cpu").float()
 
         window = traj[start:stop]
-        return window[:self.input_steps], window[self.input_steps:], index
+        return window[:self.input_steps].clone().float(), window[self.input_steps:].clone().float(), index

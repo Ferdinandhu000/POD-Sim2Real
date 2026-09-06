@@ -73,7 +73,8 @@ def _build_dataset(
     tensor_dir=None,
     cache_trajectories=True,
     max_cache_trajectories=8,
-    in_memory=True,
+    in_memory=False,
+    mmap=True,
 ):
     if tensor_dir is not None and tensor_dir.exists() and list(tensor_dir.glob("*.pt")):
         idx_file = (index_root / f"{split}_index_{suffix}.json") if index_root and suffix else None
@@ -88,6 +89,7 @@ def _build_dataset(
             metadata_root=index_root.parent if index_root else None,
             prefix_frames=prefix_frames,
             in_memory=in_memory,
+            mmap=mmap,
         )
     mode = test_mode if split in {"val", "test"} else "all"
     if index_entries is not None:
@@ -130,7 +132,8 @@ def _official_dataset(
     tensor_dir=None,
     cache_trajectories=True,
     max_cache_trajectories=8,
-    in_memory=True,
+    in_memory=False,
+    mmap=True,
 ):
     return _build_dataset(
         arrow_dir=arrow_dir,
@@ -146,6 +149,7 @@ def _official_dataset(
         cache_trajectories=cache_trajectories,
         max_cache_trajectories=max_cache_trajectories,
         in_memory=in_memory,
+        mmap=mmap,
     )
 
 
@@ -219,7 +223,8 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
 
     use_tensor_cache = bool(data.get("use_tensor_cache", True))
     reload_tensors = bool(data.get("reload_tensors", False))
-    in_memory = bool(data.get("in_memory", True))
+    in_memory = bool(data.get("in_memory", False))
+    mmap = bool(data.get("mmap", not in_memory))
 
     tensor_root_cfg = data.get("tensor_dir")
     if tensor_root_cfg:
@@ -240,7 +245,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
             num_proc = max(1, (os.cpu_count() or 4) // 2)
             preprocess_domain(real_dir, real_tensor_dir, resolution, prefix_frames=None, overwrite=reload_tensors, num_workers=num_proc, desc="Precompute Real Tensors")
             preprocess_domain(sim_dir, sim_tensor_dir, resolution, prefix_frames=None, overwrite=reload_tensors, num_workers=num_proc, desc="Precompute Sim Tensors")
-        logger.info("Using fast tensor cache: real=%s sim=%s (in_memory=%s)", real_tensor_dir, sim_tensor_dir, in_memory)
+        logger.info("Using fast tensor cache: real=%s sim=%s (in_memory=%s, mmap=%s)", real_tensor_dir, sim_tensor_dir, in_memory, mmap)
 
     official = bool(index_root and data.get("use_official_indices", False))
     bases = None
@@ -281,6 +286,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
                 cache_trajectories=cache_trajectories,
                 max_cache_trajectories=max_cache_trajectories,
                 in_memory=in_memory,
+                mmap=mmap,
             )
             for s in ("train", "val", "test")
         }
@@ -299,6 +305,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
                 cache_trajectories=cache_trajectories,
                 max_cache_trajectories=max_cache_trajectories,
                 in_memory=in_memory,
+                mmap=mmap,
             )
             for s in ("train", "val", "test")
         }
@@ -334,6 +341,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
                 cache_trajectories=cache_trajectories,
                 max_cache_trajectories=max_cache_trajectories,
                 in_memory=in_memory,
+                mmap=mmap,
             )
             for s in ("train", "val", "test")
         }
@@ -352,6 +360,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
                 cache_trajectories=cache_trajectories,
                 max_cache_trajectories=max_cache_trajectories,
                 in_memory=in_memory,
+                mmap=mmap,
             )
             for s in ("train", "val", "test")
         }
@@ -447,6 +456,13 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
     real_epochs = int(args.epochs) if args.epochs is not None else int(training.get("finetune_epochs", epochs))
     try:
         sim_state, best_sim, sim_best_epoch = run("pretrain_sim", sim_ds["train"], sim_ds["val"], sim_epochs, bases)
+        # Release simulation dataset memory and page cache before finetuning real data
+        del sim_ds
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         real_state, best_real, real_best_epoch = run("finetune_real", real_ds["train"], real_ds["val"], real_epochs, real_bases, sim_state)
     except Exception:
         logger.exception("training failed for model=%s run=%s", model_name, run_name)
@@ -503,6 +519,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
                         prefix_frames=prefix_frames,
                         tensor_dir=real_tensor_dir if use_tensor_cache else None,
                         in_memory=in_memory,
+                        mmap=mmap,
                     )
                     m = evaluate_model(test_model, sub_ds, device, batch, workers)
                     m["windows"] = len(sub_ds)
@@ -584,6 +601,10 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
             info_lines.append(f"Test Vorticity Rel-L2: {m.get('vorticity_rel_l2', 'N/A')}")
     (best_checkpoints_root / "info.txt").write_text("\n".join(info_lines) + "\n", encoding="utf-8")
     logger.info("archived best checkpoint and logs to %s", best_checkpoints_root)
+
+    PrecomputedTrajectoryDataset.clear_cache()
+    import gc
+    gc.collect()
 
     return result
 
