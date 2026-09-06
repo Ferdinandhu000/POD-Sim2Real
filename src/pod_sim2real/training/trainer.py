@@ -23,8 +23,9 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
     if initial is not None:
         model.load_state_dict(initial, strict=False)
     model.to(device)
-    loader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True, num_workers=config["num_workers"])
-    val_loader = DataLoader(val_ds, batch_size=config["batch_size"], shuffle=False, num_workers=config["num_workers"])
+    pin_memory = (device.type == "cuda")
+    loader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True, num_workers=config["num_workers"], pin_memory=pin_memory)
+    val_loader = DataLoader(val_ds, batch_size=config["batch_size"], shuffle=False, num_workers=config["num_workers"], pin_memory=pin_memory)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(trainable_params, lr=config["lr"], weight_decay=config["weight_decay"])
     best = float("inf")

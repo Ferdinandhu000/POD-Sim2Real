@@ -24,7 +24,7 @@ def evaluate_all_checkpoints(
     output_excel: str | None = None,
     device_name: str | None = None,
     batch_size: int = 16,
-    num_workers: int = 4,
+    num_workers: int = 0,
     prefix_frames_override: int | None = None,
     resolution_override: tuple[int, int] | list[int] | None = None,
 ) -> Path:
@@ -223,7 +223,7 @@ def main():
     parser.add_argument("--output-excel", type=str, help="Custom filename for Excel output (default: evaluation_results_YYYYMMDD_HHMMSS.xlsx)")
     parser.add_argument("--device", type=str, default=None, help="Device to use (cuda/cpu)")
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--prefix-frames", type=int, default=None, help="Frames to evaluate from start of trajectories (default: None for full sequence)")
     parser.add_argument("--resolution", nargs=2, type=int, default=None, help="Resolution override (H W)")
     args = parser.parse_args()

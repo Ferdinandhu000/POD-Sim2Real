@@ -161,6 +161,7 @@ class OfficialArrowWindowDataset(Dataset):
         metadata_root: str | Path | None = None,
         index_entries: list[dict[str, int | str]] | None = None,
         prefix_frames: int | None = None,
+        cache_trajectories: bool = True,
     ):
         from datasets import load_from_disk
         self.arrow_dir = Path(arrow_dir)
@@ -220,6 +221,16 @@ class OfficialArrowWindowDataset(Dataset):
             and "v" in self._pa_table.column_names
         )
 
+        # In-memory trajectory cache: caches downsampled (T, res_h, res_w) arrays in RAM.
+        # Eliminates repeated disk I/O and GB-scale deserialization for thousands of sliding windows.
+        self.cache_trajectories = cache_trajectories
+        self._traj_cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        if self.cache_trajectories:
+            unique_rows = {self.row_by_id[str(e["sim_id"])] for e in self.valid_entries}
+            if len(unique_rows) <= 128:
+                for r_idx in unique_rows:
+                    self._get_trajectory(r_idx)
+
     @staticmethod
     def _decode(raw: bytes, shape: tuple[int, ...]) -> np.ndarray:
         count = int(np.prod(shape))
@@ -251,12 +262,29 @@ class OfficialArrowWindowDataset(Dataset):
                     if itemsize == 8:
                         arr = arr.astype(np.float32, copy=False)
                     return arr
-            except Exception:
-                pass
+            except Exception as e:
+                if not getattr(self, "_warned_fallback", False):
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Arrow buffer zero-copy slicing failed (%s: %s). Falling back to full-row deserialization.",
+                        type(e).__name__, e,
+                    )
+                    self._warned_fallback = True
         # Fallback to standard row access if arrow buffer slicing is unavailable
         row = self.table[row_idx]
         raw = row[channel_name]
         return self._decode(raw, full_shape)[start:stop, ::sh, ::sw]
+
+    def _get_trajectory(self, row_idx: int) -> tuple[np.ndarray, np.ndarray]:
+        if row_idx in self._traj_cache:
+            return self._traj_cache[row_idx]
+        full_shape = self.shapes_by_row[row_idx]
+        sh = full_shape[1] // int(self.resolution[0])
+        sw = full_shape[2] // int(self.resolution[1])
+        u = self._slice_field("u", row_idx, full_shape, 0, full_shape[0], sh, sw)
+        v = self._slice_field("v", row_idx, full_shape, 0, full_shape[0], sh, sw)
+        self._traj_cache[row_idx] = (u, v)
+        return u, v
 
     def __len__(self) -> int:
         return len(self.valid_entries)
@@ -273,8 +301,13 @@ class OfficialArrowWindowDataset(Dataset):
         sw = full_shape[2] // int(self.resolution[1])
         if full_shape[1] % int(self.resolution[0]) or full_shape[2] % int(self.resolution[1]):
             raise ValueError(f"resolution {self.resolution} is not an integer subsample of {full_shape[1:]}")
-        u = self._slice_field("u", row_idx, full_shape, start, stop, sh, sw)
-        v = self._slice_field("v", row_idx, full_shape, start, stop, sh, sw)
+        if self.cache_trajectories:
+            u_full, v_full = self._get_trajectory(row_idx)
+            u = u_full[start:stop]
+            v = v_full[start:stop]
+        else:
+            u = self._slice_field("u", row_idx, full_shape, start, stop, sh, sw)
+            v = self._slice_field("v", row_idx, full_shape, start, stop, sh, sw)
         fields = torch.from_numpy(np.stack((u, v), axis=1).astype(np.float32, copy=False))
         return fields[:self.input_steps], fields[self.input_steps:], index
 
