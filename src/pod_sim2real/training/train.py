@@ -100,8 +100,18 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
     workers = int(args.num_workers if args.num_workers is not None else training.get("num_workers", 0))
     epochs = int(args.epochs or training.get("pretrain_epochs", 2))
     input_steps, output_steps = int(data.get("input_steps", 20)), int(data.get("output_steps", 20))
-    raw_prefix = args.prefix_frames if args.prefix_frames is not None else data.get("prefix_frames", None)
-    prefix_frames = int(raw_prefix) if (raw_prefix is not None and int(raw_prefix) > 0) else None
+    raw_prefix = args.prefix_frames
+    if raw_prefix is None:
+        raw_prefix = data.get("prefix_frames", None)
+    if raw_prefix is None:
+        raw_prefix = data.get("prefix_ratio", None)
+    if raw_prefix is None:
+        raw_prefix = data.get("prefix_fraction", None)
+    if raw_prefix is not None:
+        val = float(raw_prefix)
+        prefix_frames = val if val > 0 else None
+    else:
+        prefix_frames = None
 
     out.mkdir(parents=True, exist_ok=True)
     logger = make_logger(out / "logs")
@@ -388,7 +398,7 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--test-mode", choices=("all", "seen", "in_dist", "out_dist", "unseen"))
-    parser.add_argument("--prefix-frames", type=int, help="Fixed number of frames to use from start of each trajectory (default: 2000)")
+    parser.add_argument("--prefix-frames", type=float, help="Fixed number of frames (> 1) or fraction (0 < float <= 1.0) to use from start of each trajectory")
     args = parser.parse_args()
 
     if args.config_dir:

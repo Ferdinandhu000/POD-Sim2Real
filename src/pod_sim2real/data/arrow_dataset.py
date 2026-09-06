@@ -79,9 +79,9 @@ def _read_batch(path: Path) -> Iterable[dict]:
     with pa.memory_map(str(path), "r") as source:
         reader = ipc.open_stream(source)
         for batch in reader:
-            data = batch.to_pydict()
+            col_names = batch.schema.names
             for i in range(batch.num_rows):
-                yield {key: values[i] for key, values in data.items()}
+                yield {name: batch.column(name)[i].as_py() for name in col_names}
 
 
 def read_trajectory(path: str | Path, domain: str, record_index: int = 0) -> ArrowTrajectory:
@@ -161,7 +161,7 @@ class OfficialArrowWindowDataset(Dataset):
         test_mode: str = "all",
         metadata_root: str | Path | None = None,
         index_entries: list[dict[str, int | str]] | None = None,
-        prefix_frames: int | None = None,
+        prefix_frames: int | float | None = None,
         cache_trajectories: bool = True,
         max_cache_trajectories: int = 8,
     ):
@@ -205,10 +205,25 @@ class OfficialArrowWindowDataset(Dataset):
             for i in range(len(meta_table))
         ]
         self.valid_entries = [e for e in self.entries if str(e["sim_id"]) in self.row_by_id]
-        if prefix_frames is not None and int(prefix_frames) > 0:
+        if prefix_frames is not None:
             horizon = self.input_steps + self.output_steps
-            max_start = int(prefix_frames) - horizon
-            self.valid_entries = [e for e in self.valid_entries if int(e["time_id"]) <= max_start]
+            prefix_val = float(prefix_frames)
+            if 0.0 < prefix_val <= 1.0:
+                # Relative fraction: each trajectory is cut at int(total_t * prefix_val)
+                def _is_valid(e: dict[str, int | str]) -> bool:
+                    row_idx = self.row_by_id[str(e["sim_id"])]
+                    total_t = self.shapes_by_row[row_idx][0]
+                    max_start = int(total_t * prefix_val) - horizon
+                    return int(e["time_id"]) <= max_start
+                self.valid_entries = [e for e in self.valid_entries if _is_valid(e)]
+            elif prefix_val > 1.0:
+                # Absolute frame count: each trajectory is cut at min(total_t, int(prefix_val))
+                def _is_valid(e: dict[str, int | str]) -> bool:
+                    row_idx = self.row_by_id[str(e["sim_id"])]
+                    total_t = self.shapes_by_row[row_idx][0]
+                    max_start = min(total_t, int(prefix_val)) - horizon
+                    return int(e["time_id"]) <= max_start
+                self.valid_entries = [e for e in self.valid_entries if _is_valid(e)]
         if not self.valid_entries:
             raise ValueError(f"no indexed trajectories found in {self.arrow_dir} for {self.index_file}")
 
@@ -369,14 +384,17 @@ def build_trajectory_prefix_entries(
     output_steps: int,
     stride: int,
     *,
-    prefix_frames: int | None = None,
+    prefix_frames: int | float | None = None,
     trajectory_splits: dict[str, list[str]] | None = None,
     seed: int = 42,
     train_fraction: float = 0.8,
     val_fraction: float = 0.1,
 ) -> dict[str, list[dict[str, int | str]]]:
     """Build windows from trajectories assigned to each split.
-    If prefix_frames is specified and > 0, cuts to prefix_frames; otherwise uses the full trajectory.
+    If prefix_frames is specified:
+      - if 0.0 < prefix_frames <= 1.0: cuts to the first prefix_frames fraction of each trajectory;
+      - if prefix_frames > 1.0: cuts to prefix_frames frames;
+      - otherwise uses the full trajectory.
     """
     rows = _trajectory_rows(arrow_dir)
     by_id = {str(row["sim_id"]): int(row["shape_t"]) for row in rows}
@@ -392,10 +410,17 @@ def build_trajectory_prefix_entries(
             seen.add(sim_id)
             if sim_id not in by_id:
                 continue
-            if prefix_frames is not None and int(prefix_frames) > 0:
-                prefix_end = min(by_id[sim_id], max(horizon, int(prefix_frames)))
+            total_t = by_id[sim_id]
+            if prefix_frames is not None:
+                prefix_val = float(prefix_frames)
+                if 0.0 < prefix_val <= 1.0:
+                    prefix_end = min(total_t, max(horizon, int(total_t * prefix_val)))
+                elif prefix_val > 1.0:
+                    prefix_end = min(total_t, max(horizon, int(prefix_val)))
+                else:
+                    prefix_end = total_t
             else:
-                prefix_end = by_id[sim_id]
+                prefix_end = total_t
             starts = range(0, prefix_end - horizon + 1, max(1, int(stride)))
             result[split].extend({"sim_id": sim_id, "time_id": int(time_id)} for time_id in starts)
     if any(not result[split] for split in result):

@@ -77,8 +77,18 @@ def evaluate_all_checkpoints(
 
         input_steps = int(data_cfg.get("input_steps", 20))
         output_steps = int(data_cfg.get("output_steps", 20))
-        raw_prefix = prefix_frames_override if prefix_frames_override is not None else data_cfg.get("prefix_frames", None)
-        prefix_frames = int(raw_prefix) if (raw_prefix is not None and int(raw_prefix) > 0) else None
+        raw_prefix = prefix_frames_override
+        if raw_prefix is None:
+            raw_prefix = data_cfg.get("prefix_frames", None)
+        if raw_prefix is None:
+            raw_prefix = data_cfg.get("prefix_ratio", None)
+        if raw_prefix is None:
+            raw_prefix = data_cfg.get("prefix_fraction", None)
+        if raw_prefix is not None:
+            val = float(raw_prefix)
+            prefix_frames = val if val > 0 else None
+        else:
+            prefix_frames = None
         resolution = tuple(resolution_override or data_cfg.get("resolution", [64, 128]))
 
         # Resolve dataset directories
@@ -224,7 +234,7 @@ def main():
     parser.add_argument("--device", type=str, default=None, help="Device to use (cuda/cpu)")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--prefix-frames", type=int, default=None, help="Frames to evaluate from start of trajectories (default: None for full sequence)")
+    parser.add_argument("--prefix-frames", type=float, default=None, help="Frames or fraction to evaluate from start of trajectories (default: None for full sequence)")
     parser.add_argument("--resolution", nargs=2, type=int, default=None, help="Resolution override (H W)")
     args = parser.parse_args()
 
