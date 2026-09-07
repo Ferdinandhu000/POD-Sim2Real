@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import shutil
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -609,10 +613,310 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
     return result
 
 
+def parse_gpu_ids(gpu_arg: str | None) -> list[str]:
+    """Parse a GPU argument string into a list of GPU ID strings.
+
+    Supports:
+        - None or empty string -> []
+        - 'auto' or 'all' -> all available CUDA devices (e.g. ['0', '1', '2', '3'])
+        - Comma-separated list -> '0,1,2,3' -> ['0', '1', '2', '3']
+        - Range -> '0-3' -> ['0', '1', '2', '3']
+        - Mixed -> '0, 1-3' -> ['0', '1', '2', '3']
+    """
+    if not gpu_arg:
+        return []
+    gpu_arg = str(gpu_arg).strip()
+    if gpu_arg.lower() in ("auto", "all"):
+        count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if count == 0:
+            return ["0"]
+        return [str(i) for i in range(count)]
+
+    gpu_ids = []
+    for part in gpu_arg.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = part.split("-", 1)
+            gpu_ids.extend(str(i) for i in range(int(start.strip()), int(end.strip()) + 1))
+        else:
+            gpu_ids.append(str(int(part)))
+
+    seen = set()
+    deduped = []
+    for gid in gpu_ids:
+        if gid not in seen:
+            seen.add(gid)
+            deduped.append(gid)
+    return deduped
+
+
+def ensure_tensor_cache_ready(config_files: list[Path], args: argparse.Namespace) -> None:
+    """Precompute tensor cache once in the parent process if required, avoiding worker write races."""
+    for cfg_file in config_files:
+        try:
+            cfg = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        data = cfg.get("data", {})
+        if not bool(data.get("use_tensor_cache", True)):
+            continue
+        reload_tensors = bool(data.get("reload_tensors", False))
+        data_root = Path(getattr(args, "data_root", None) or cfg.get("data_root") or cfg_file.parent.parent)
+        resolution = tuple(getattr(args, "resolution", None) or data.get("resolution", (64, 128)))
+        try:
+            real_dir, sim_dir, _ = _resolve_data_layout(data_root, data)
+        except Exception:
+            continue
+
+        tensor_root_cfg = data.get("tensor_dir")
+        if tensor_root_cfg:
+            tensor_root = Path(tensor_root_cfg)
+        else:
+            parent = real_dir.parent.parent if real_dir.parent.name in ("hf_dataset", "real") else real_dir.parent
+            tensor_root = parent / f"tensor_cache_{resolution[0]}x{resolution[1]}"
+
+        real_tensor_dir = tensor_root / "real"
+        sim_tensor_dir = tensor_root / "numerical"
+        has_real_pt = real_tensor_dir.exists() and bool(list(real_tensor_dir.glob("*.pt")))
+        has_sim_pt = sim_tensor_dir.exists() and bool(list(sim_tensor_dir.glob("*.pt")))
+
+        if reload_tensors or not (has_real_pt and has_sim_pt):
+            print(f"[Multi-GPU Dispatcher] Precomputing tensor cache at {tensor_root} before parallel dispatch...")
+            num_proc = max(1, (os.cpu_count() or 4) // 2)
+            preprocess_domain(real_dir, real_tensor_dir, resolution, prefix_frames=None, overwrite=reload_tensors, num_workers=num_proc, desc="Precompute Real Tensors")
+            preprocess_domain(sim_dir, sim_tensor_dir, resolution, prefix_frames=None, overwrite=reload_tensors, num_workers=num_proc, desc="Precompute Sim Tensors")
+            print(f"[Multi-GPU Dispatcher] Tensor cache ready at {tensor_root}.")
+            return
+
+
+def run_configs_multi_gpu(
+    config_files: list[Path],
+    gpu_ids: list[str],
+    args: argparse.Namespace,
+) -> dict[str, dict]:
+    """Execute multiple configuration files concurrently across specified GPUs using isolated worker subprocesses."""
+    ensure_tensor_cache_ready(config_files, args)
+
+    print(f"\n{'='*80}")
+    print(f"Multi-GPU Training Dispatcher: {len(config_files)} configurations, {len(gpu_ids)} GPUs: {gpu_ids}")
+    print(f"{'='*80}\n")
+
+    pending_configs = list(config_files)
+    idle_gpus = list(gpu_ids)
+    active_jobs: dict[str, dict] = {}
+    completed_results: dict[str, dict] = {}
+    last_heartbeat = time.time()
+
+    def _build_cmd(cfg_path: Path) -> list[str]:
+        cmd = [
+            sys.executable,
+            "-u",
+            "-m",
+            "pod_sim2real.training.train",
+            "--config",
+            str(cfg_path),
+        ]
+        if args.model:
+            cmd.extend(["--model", str(args.model)])
+        if args.data_root:
+            cmd.extend(["--data-root", str(args.data_root)])
+        if args.output_dir:
+            cmd.extend(["--output-dir", str(args.output_dir)])
+        if args.best_checkpoints_dir:
+            cmd.extend(["--best-checkpoints-dir", str(args.best_checkpoints_dir)])
+        if args.resolution:
+            cmd.extend(["--resolution", str(args.resolution[0]), str(args.resolution[1])])
+        if args.stride is not None:
+            cmd.extend(["--stride", str(args.stride)])
+        if args.epochs is not None:
+            cmd.extend(["--epochs", str(args.epochs)])
+        if args.batch_size is not None:
+            cmd.extend(["--batch-size", str(args.batch_size)])
+        if args.seed is not None:
+            cmd.extend(["--seed", str(args.seed)])
+        if args.num_workers is not None:
+            cmd.extend(["--num-workers", str(args.num_workers)])
+        if args.resume:
+            cmd.extend(["--resume", str(args.resume)])
+        if args.test_mode:
+            cmd.extend(["--test-mode", str(args.test_mode)])
+        if args.prefix_frames is not None:
+            cmd.extend(["--prefix-frames", str(args.prefix_frames)])
+        if args.device:
+            cmd.extend(["--device", str(args.device)])
+        return cmd
+
+    try:
+        while pending_configs or active_jobs:
+            # Launch configs on available GPUs
+            while idle_gpus and pending_configs:
+                gpu_id = idle_gpus.pop(0)
+                cfg_path = pending_configs.pop(0)
+
+                run_name = cfg_path.stem
+                try:
+                    cfg_dict = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+                    base_out = args.output_dir or cfg_dict.get("output_dir", "artifacts/runs")
+                except Exception:
+                    base_out = args.output_dir or "artifacts/runs"
+                out_dir = Path(base_out) / run_name
+
+                out_dir.mkdir(parents=True, exist_ok=True)
+                console_log_path = out_dir / "console.log"
+                log_fp = open(console_log_path, "w", encoding="utf-8")
+
+                env = os.environ.copy()
+                env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+                env["PYTHONUNBUFFERED"] = "1"
+                src_path = str(Path(__file__).resolve().parent.parent.parent)
+                if "PYTHONPATH" in env and env["PYTHONPATH"]:
+                    env["PYTHONPATH"] = f"{src_path}{os.pathsep}{env['PYTHONPATH']}"
+                else:
+                    env["PYTHONPATH"] = src_path
+
+                cmd = _build_cmd(cfg_path)
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=log_fp,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                )
+
+                active_jobs[gpu_id] = {
+                    "proc": proc,
+                    "cfg": cfg_path,
+                    "run_name": run_name,
+                    "out_dir": out_dir,
+                    "log_fp": log_fp,
+                    "log_path": console_log_path,
+                    "start_time": time.time(),
+                }
+                now_str = time.strftime("%H:%M:%S")
+                print(f"[{now_str}] [GPU {gpu_id}] >>> Started {cfg_path.stem} | Log: {console_log_path}")
+
+            # Check status of running processes
+            for gpu_id in list(active_jobs.keys()):
+                job = active_jobs[gpu_id]
+                ret = job["proc"].poll()
+                if ret is not None:
+                    job["log_fp"].close()
+                    elapsed = time.time() - job["start_time"]
+                    m, s = divmod(int(elapsed), 60)
+                    elapsed_str = f"{m}m {s:02d}s"
+                    now_str = time.strftime("%H:%M:%S")
+
+                    if ret == 0:
+                        res_file = job["out_dir"] / "results.json"
+                        res_data = {}
+                        if res_file.exists():
+                            try:
+                                res_data = json.loads(res_file.read_text(encoding="utf-8"))
+                            except Exception:
+                                pass
+                        test_mse = res_data.get("real_test_mse")
+                        test_rel = res_data.get("real_test_metrics", {}).get("rel_l2")
+                        mse_str = f"Test MSE: {test_mse:.6g}" if isinstance(test_mse, (float, int)) else ""
+                        rel_str = f"Rel-L2: {test_rel:.6g}" if isinstance(test_rel, (float, int)) else ""
+                        metrics_summary = f"{mse_str} {rel_str}".strip()
+                        print(f"[{now_str}] [GPU {gpu_id}] [COMPLETED] {job['cfg'].stem} ({elapsed_str}) {metrics_summary}")
+                        completed_results[job["cfg"].stem] = {
+                            "status": "SUCCESS",
+                            "duration_seconds": elapsed,
+                            "duration_str": elapsed_str,
+                            "results": res_data,
+                            "log_path": str(job["log_path"]),
+                        }
+                    else:
+                        print(f"[{now_str}] [GPU {gpu_id}] [FAILED] {job['cfg'].stem} (exit code: {ret}, elapsed: {elapsed_str})")
+                        try:
+                            lines = job["log_path"].read_text(encoding="utf-8", errors="replace").splitlines()
+                            tail = "\n".join(lines[-15:])
+                            print(f"--- Tail of {job['log_path']} ---\n{tail}\n---------------------------------------------")
+                        except Exception as e:
+                            print(f"Could not read log file: {e}")
+                        completed_results[job["cfg"].stem] = {
+                            "status": f"FAILED (exit {ret})",
+                            "duration_seconds": elapsed,
+                            "duration_str": elapsed_str,
+                            "log_path": str(job["log_path"]),
+                        }
+
+                    del active_jobs[gpu_id]
+                    idle_gpus.append(gpu_id)
+
+            # Heartbeat print every 30s if jobs are running
+            if active_jobs and (time.time() - last_heartbeat >= 30.0):
+                last_heartbeat = time.time()
+                now_str = time.strftime("%H:%M:%S")
+                running_desc = ", ".join(
+                    f"GPU {gid}: {j['cfg'].stem} ({int(time.time() - j['start_time'])}s)"
+                    for gid, j in active_jobs.items()
+                )
+                done_count = len(completed_results)
+                total_count = len(config_files)
+                print(f"[{now_str}] Status: {len(active_jobs)} active, {len(pending_configs)} pending, {done_count}/{total_count} done | {running_desc}")
+
+            time.sleep(1.0)
+
+    except KeyboardInterrupt:
+        print("\n[Ctrl+C received] Terminating all active multi-GPU training processes...")
+        for gid, job in active_jobs.items():
+            try:
+                job["proc"].terminate()
+            except Exception:
+                pass
+        time.sleep(1.5)
+        for gid, job in active_jobs.items():
+            try:
+                if job["proc"].poll() is None:
+                    job["proc"].kill()
+                job["log_fp"].close()
+            except Exception:
+                pass
+        print("[Multi-GPU Dispatcher] All processes terminated cleanly.")
+        raise
+
+    # -------------------------------------------------------------
+    # Print Final Summary Table
+    # -------------------------------------------------------------
+    print(f"\n{'='*80}")
+    print(f"Multi-GPU Training Summary ({len(gpu_ids)} GPUs)")
+    print(f"{'='*80}")
+    print(f"{'Config Name':<32} | {'Status':<10} | {'Duration':<10} | {'Test MSE':<12} | {'Test Rel-L2':<12}")
+    print(f"{'-'*80}")
+    for cfg_file in config_files:
+        info = completed_results.get(cfg_file.stem, {})
+        status = info.get("status", "UNKNOWN")
+        dur = info.get("duration_str", "N/A")
+        res = info.get("results", {})
+        tmse = res.get("real_test_mse")
+        trel = res.get("real_test_metrics", {}).get("rel_l2")
+        tmse_str = f"{tmse:.6g}" if isinstance(tmse, (float, int)) else "N/A"
+        trel_str = f"{trel:.6g}" if isinstance(trel, (float, int)) else "N/A"
+        print(f"{cfg_file.stem:<32} | {status:<10} | {dur:<10} | {tmse_str:<12} | {trel_str:<12}")
+    print(f"{'='*80}\n")
+
+    # Save summary to artifacts/runs/multi_gpu_summary.json
+    summary_path = Path("artifacts/runs/multi_gpu_summary.json")
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(completed_results, indent=2), encoding="utf-8")
+    print(f"Detailed run summary saved to {summary_path}")
+
+    return completed_results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="POD Sim2Real Training Pipeline")
     parser.add_argument("--config", type=Path, help="Path to single YAML configuration file")
-    parser.add_argument("--config-dir", type=Path, help="Directory containing YAML configuration files to run sequentially")
+    parser.add_argument("--config-dir", type=Path, help="Directory containing YAML configuration files to run")
+    parser.add_argument(
+        "--gpus",
+        type=str,
+        default=None,
+        help="Comma-separated GPU IDs (e.g. '0,1,2,3'), range ('0-3'), or 'auto'/'all' to run configs in parallel",
+    )
     parser.add_argument("--model", choices=MODELS, help="Model name override")
     parser.add_argument("--data-root", type=Path)
     parser.add_argument("--output-dir", type=Path)
@@ -637,6 +941,15 @@ def main() -> None:
         if not config_files:
             raise FileNotFoundError(f"no YAML configuration files found in {config_dir}")
         print(f"Discovered {len(config_files)} configurations in {config_dir}: {[f.name for f in config_files]}")
+
+        gpu_ids = parse_gpu_ids(args.gpus)
+        if len(gpu_ids) > 1:
+            run_configs_multi_gpu(config_files, gpu_ids, args)
+            return
+
+        if len(gpu_ids) == 1:
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids[0]
+
         all_results = {}
         for cfg_file in config_files:
             print(f"\n{'='*80}\nStarting configuration: {cfg_file.name}\n{'='*80}")
@@ -648,6 +961,9 @@ def main() -> None:
                 raise
         print(f"\nAll {len(config_files)} configurations in {config_dir} completed successfully!")
     elif args.config:
+        gpu_ids = parse_gpu_ids(args.gpus)
+        if gpu_ids:
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids[0]
         run_single_config(args.config, args)
     else:
         parser.error("must provide either --config or --config-dir")
