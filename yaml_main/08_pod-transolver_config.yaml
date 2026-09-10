@@ -38,4 +38,4 @@ model:
   width: 32
   depth: 3
   heads: 4
-  slice_num: 16
+  slice_num: 8

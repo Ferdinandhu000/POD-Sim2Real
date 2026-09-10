@@ -7,6 +7,7 @@ from pod_sim2real.model import (
     PODModel,
     PODTransolver,
     PODiTransolver,
+    Transolver1dCoeff,
     build_coeff_operator,
     build_model,
     iTransolver1dCoeff,
@@ -105,17 +106,36 @@ def test_itransolver_coeff_operator_standalone():
     out.sum().backward()
 
 
-def test_pod_itransolver_class_and_alias():
+def test_transolver_coeff_operator_standalone():
+    rank = 4
+    op = Transolver1dCoeff(rank=rank, width=16, depth=2, heads=2, slice_num=4, input_steps=5, output_steps=3)
+    x = torch.randn(2, 5, 2 * rank)
+    out = op(x)
+    assert out.shape == (2, 3, 2 * rank)
+    out.sum().backward()
+
+
+def test_pod_transolver_and_itransolver_distinct():
+    assert PODTransolver is not PODiTransolver
     bases = _bases(height=8, width=12, rank=4)
-    model = PODiTransolver(bases, width=16, input_steps=4, output_steps=4, depth=2, heads=2, slice_num=4)
-    assert isinstance(model, PODModel)
-    assert isinstance(model, PODiTransolver)
-    assert PODTransolver is PODiTransolver
+    model_inv = PODiTransolver(bases, width=16, input_steps=4, output_steps=4, depth=2, heads=2, slice_num=4)
+    model_fwd = PODTransolver(bases, width=16, input_steps=4, output_steps=4, depth=2, heads=2, slice_num=4)
+
+    assert isinstance(model_inv, PODModel) and isinstance(model_inv, PODiTransolver)
+    assert isinstance(model_fwd, PODModel) and isinstance(model_fwd, PODTransolver)
+    assert model_inv.kind == "itransolver"
+    assert model_fwd.kind == "transolver"
+    assert isinstance(model_fwd.net, Transolver1dCoeff)
 
     x = torch.randn(2, 4, 2, 8, 12)
-    out = model(x)
-    assert out.shape == (2, 4, 2, 8, 12)
-    out.sum().backward()
+    out_inv = model_inv(x)
+    assert out_inv.shape == (2, 4, 2, 8, 12)
+    out_inv.sum().backward()
+
+    out_fwd = model_fwd(x)
+    assert out_fwd.shape == (2, 4, 2, 8, 12)
+    out_fwd.sum().backward()
+
 
 
 

@@ -482,6 +482,62 @@ class iTransolver1dCoeff(nn.Module):
         return out
 
 
+class Transolver1dCoeff(nn.Module):
+    """Forward Transolver operator across temporal steps of POD modal coefficients.
+
+    Tokens are time steps t = 1 ... input_steps.
+    PhysicsAttention computes attention across temporal slices to model dynamic evolution.
+    """
+    def __init__(
+        self,
+        rank: int,
+        width: int = 32,
+        depth: int = 3,
+        heads: int = 4,
+        slice_num: int = 8,
+        dropout: float = 0.0,
+        input_steps: int = 20,
+        output_steps: int = 20,
+    ):
+        super().__init__()
+        self.rank = rank
+        self.variables = 2 * rank
+        self.input_steps = input_steps
+        self.output_steps = output_steps
+        if width % heads:
+            heads = max(1, math.gcd(width, heads))
+        self.lift = nn.Linear(self.variables, width)
+        self.pos_embed = nn.Parameter(torch.zeros(1, input_steps, width))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        self.dropout = nn.Dropout(dropout)
+        actual_slice_num = max(1, min(slice_num, input_steps))
+        self.blocks = nn.ModuleList(
+            TransolverBlock(width, heads, actual_slice_num, dropout)
+            for _ in range(depth)
+        )
+        self.norm = nn.LayerNorm(width)
+        self.time_project = nn.Linear(input_steps, output_steps) if input_steps != output_steps else nn.Identity()
+        self.project = nn.Sequential(
+            nn.Linear(width, width * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(width * 2, self.variables),
+        )
+
+    def forward(self, x):
+        # x: [B, input_steps, variables]
+        batch, steps, variables = x.shape
+        if steps != self.input_steps or variables != self.variables:
+            raise ValueError(f"expected [B, {self.input_steps}, {self.variables}], got {x.shape}")
+        tokens = self.lift(x) + self.pos_embed
+        tokens = self.dropout(tokens)
+        for block in self.blocks:
+            tokens = block(tokens)
+        tokens = self.norm(tokens)
+        tokens_t = self.time_project(tokens.transpose(1, 2)).transpose(1, 2)
+        return self.project(tokens_t)
+
+
 class MLP1dCoeff(nn.Module):
     """1D MLP / ResNet operator across POD modal coefficients."""
     def __init__(self, rank, width=32, layers=3, input_steps=20, output_steps=20):
@@ -526,7 +582,9 @@ def build_coeff_operator(
         return UNet1dCoeff(rank, width=width, input_steps=input_steps, output_steps=output_steps)
     elif op in ("itransformer", "transformer"):
         return iTransformer1dCoeff(rank, width=width, depth=depth, heads=heads, dropout=dropout, input_steps=input_steps, output_steps=output_steps)
-    elif op in ("itransolver", "transolver"):
+    elif op in ("transolver", "transolver1d"):
+        return Transolver1dCoeff(rank, width=width, depth=depth, heads=heads, slice_num=slice_num, dropout=dropout, input_steps=input_steps, output_steps=output_steps)
+    elif op in ("itransolver", "itransolver1d"):
         return iTransolver1dCoeff(rank, width=width, depth=depth, heads=heads, slice_num=slice_num, dropout=dropout, input_steps=input_steps, output_steps=output_steps)
     elif op in ("mlp", "linear", "resnet"):
         return MLP1dCoeff(rank, width=width, layers=depth, input_steps=input_steps, output_steps=output_steps)
@@ -542,8 +600,6 @@ class PODModel(nn.Module):
         kind = (kind or "fno").lower().replace("_", "-")
         if kind.startswith("pod-"):
             kind = kind.removeprefix("pod-")
-        if kind == "transolver":
-            kind = "itransolver"
         self.kind, self.rank = kind, bases[0].modes.shape[0]
         self.input_steps, self.output_steps = input_steps, output_steps
         self.register_buffer("mean", torch.from_numpy(np.stack([basis.mean for basis in bases]).astype(np.float32)))
@@ -558,6 +614,18 @@ class PODModel(nn.Module):
             self.embed, self.net, self.head = nn.Linear(input_steps, width), nn.ModuleList(AFNOBlock(width, blocks, dropout) for _ in range(depth)), nn.Linear(width, output_steps)
         elif kind == "unet":
             self.net = UNet1dCoeff(self.rank, width=width, input_steps=input_steps, output_steps=output_steps)
+        elif kind == "transolver":
+            actual_slice = max(1, min(slice_num, input_steps))
+            self.net = Transolver1dCoeff(
+                self.rank,
+                width=width,
+                depth=depth,
+                heads=heads,
+                slice_num=actual_slice,
+                dropout=dropout,
+                input_steps=input_steps,
+                output_steps=output_steps,
+            )
         elif kind in {"itransformer", "itransolver"}:
             if width % heads:
                 raise ValueError("attention width must be divisible by heads")
@@ -597,7 +665,7 @@ class PODModel(nn.Module):
         _, steps, variables = coefficients.shape
         if (steps, variables) != (self.input_steps, 2 * self.rank):
             raise ValueError("coefficient sequence does not match model configuration")
-        if self.kind in {"fno", "unet"}:
+        if self.kind in {"fno", "unet", "transolver"}:
             return self.net(coefficients)
         tokens = coefficients.transpose(1, 2)
         if self.kind == "afno":
@@ -623,12 +691,45 @@ class PODModel(nn.Module):
         return self.field(self._forecast_coefficients(coefficients), height, width)
 
 
+class PODTransolver(PODModel):
+    """Proper Orthogonal Decomposition + Forward Transolver (POD-Transolver).
+
+    Projects spatiotemporal velocity fields onto orthonormal POD modes, treats
+    time steps as tokens, and predicts temporal dynamics using Transolver's
+    physics-attention across temporal slices.
+    """
+    def __init__(
+        self,
+        bases,
+        width: int = 32,
+        input_steps: int = 20,
+        output_steps: int = 20,
+        depth: int = 3,
+        heads: int = 4,
+        slice_num: int = 8,
+        dropout: float = 0.0,
+        **kwargs,
+    ):
+        super().__init__(
+            bases=bases,
+            kind="transolver",
+            width=width,
+            input_steps=input_steps,
+            output_steps=output_steps,
+            depth=depth,
+            heads=heads,
+            slice_num=slice_num,
+            dropout=dropout,
+            **kwargs,
+        )
+
+
 class PODiTransolver(PODModel):
     """Proper Orthogonal Decomposition + Inverted Transolver (POD-iTransolver).
 
     Projects spatiotemporal velocity fields onto orthonormal POD modes, treats
     modal coefficient temporal evolutions as inverted tokens, and predicts
-    multivariate modal dynamics using Transolver's physics-attention.
+    multivariate modal dynamics using Transolver's physics-attention across modes.
     """
     def __init__(
         self,
@@ -654,9 +755,6 @@ class PODiTransolver(PODModel):
             dropout=dropout,
             **kwargs,
         )
-
-
-PODTransolver = PODiTransolver
 
 
 class ContinuousNeuralFieldDecoder(nn.Module):
@@ -886,7 +984,18 @@ def build_model(name, bases=None, width=32, input_steps=20, output_steps=20, **o
             micro_operator=options.get("micro_operator", "fno"),
             native_resolution=options.get("native_resolution", None),
         )
-    if name in {"pod-itransolver", "pod-transolver"}:
+    if name == "pod-transolver":
+        if bases is None:
+            raise ValueError("POD models require fitted bases")
+        return PODTransolver(
+            bases,
+            **common,
+            depth=int(options.get("depth", 3)),
+            heads=int(options.get("heads", 4)),
+            dropout=float(options.get("dropout", 0.0)),
+            slice_num=int(options.get("slice_num", 8)),
+        )
+    if name == "pod-itransolver":
         if bases is None:
             raise ValueError("POD models require fitted bases")
         return PODiTransolver(
@@ -901,7 +1010,16 @@ def build_model(name, bases=None, width=32, input_steps=20, output_steps=20, **o
         if bases is None:
             raise ValueError("POD models require fitted bases")
         kind = name.removeprefix("pod-")
-        if kind in ("transolver", "itransolver"):
+        if kind == "transolver":
+            return PODTransolver(
+                bases,
+                **common,
+                depth=int(options.get("depth", 3)),
+                heads=int(options.get("heads", 4)),
+                dropout=float(options.get("dropout", 0.0)),
+                slice_num=int(options.get("slice_num", 8)),
+            )
+        if kind == "itransolver":
             return PODiTransolver(
                 bases,
                 **common,
