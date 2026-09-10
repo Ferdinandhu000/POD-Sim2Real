@@ -432,6 +432,56 @@ class iTransformer1dCoeff(nn.Module):
         return out
 
 
+class iTransolver1dCoeff(nn.Module):
+    """Inverted Transolver operator over 1D POD modal coefficient channels."""
+    def __init__(
+        self,
+        rank: int,
+        width: int = 32,
+        depth: int = 3,
+        heads: int = 4,
+        slice_num: int = 16,
+        dropout: float = 0.0,
+        input_steps: int = 20,
+        output_steps: int = 20,
+    ):
+        super().__init__()
+        self.rank = rank
+        self.variables = 2 * rank
+        self.input_steps = input_steps
+        self.output_steps = output_steps
+        if width % heads:
+            heads = max(1, math.gcd(width, heads))
+        self.embed = nn.Linear(input_steps, width)
+        self.channel_embedding = nn.Embedding(2, width)
+        self.mode_embedding = nn.Embedding(rank, width)
+        self.dropout = nn.Dropout(dropout)
+        actual_slice_num = min(slice_num, self.variables)
+        self.blocks = nn.ModuleList(
+            TransolverBlock(width, heads, actual_slice_num, dropout)
+            for _ in range(depth)
+        )
+        self.head = nn.Linear(width, output_steps)
+
+    def forward(self, x):
+        # x: [B, input_steps, 2*rank]
+        batch, steps, variables = x.shape
+        tokens = x.transpose(1, 2)  # [B, 2*rank, input_steps]
+        means = tokens.mean(dim=-1, keepdim=True).detach()
+        scales = tokens.var(dim=-1, keepdim=True, unbiased=False).add(1e-5).sqrt().detach()
+        norm_tokens = (tokens - means) / scales
+
+        channels = torch.arange(2, device=x.device).repeat_interleave(self.rank)
+        modes = torch.arange(self.rank, device=x.device).repeat(2)
+        pos = self.channel_embedding(channels) + self.mode_embedding(modes)
+
+        tokens = self.dropout(self.embed(norm_tokens) + pos.unsqueeze(0))
+        for block in self.blocks:
+            tokens = block(tokens)
+        out = (self.head(tokens) * scales + means).transpose(1, 2)  # [B, output_steps, 2*rank]
+        return out
+
+
 class MLP1dCoeff(nn.Module):
     """1D MLP / ResNet operator across POD modal coefficients."""
     def __init__(self, rank, width=32, layers=3, input_steps=20, output_steps=20):
@@ -467,6 +517,7 @@ def build_coeff_operator(
     modes: int = 8,
     input_steps: int = 20,
     output_steps: int = 20,
+    slice_num: int = 16,
 ):
     op = (op_type or "fno").lower().replace("_", "-")
     if op in ("fno", "fno1d"):
@@ -475,6 +526,8 @@ def build_coeff_operator(
         return UNet1dCoeff(rank, width=width, input_steps=input_steps, output_steps=output_steps)
     elif op in ("itransformer", "transformer"):
         return iTransformer1dCoeff(rank, width=width, depth=depth, heads=heads, dropout=dropout, input_steps=input_steps, output_steps=output_steps)
+    elif op in ("itransolver", "transolver"):
+        return iTransolver1dCoeff(rank, width=width, depth=depth, heads=heads, slice_num=slice_num, dropout=dropout, input_steps=input_steps, output_steps=output_steps)
     elif op in ("mlp", "linear", "resnet"):
         return MLP1dCoeff(rank, width=width, layers=depth, input_steps=input_steps, output_steps=output_steps)
     else:
@@ -486,6 +539,11 @@ class PODModel(nn.Module):
         super().__init__()
         if len(bases) != 2 or bases[0].modes.shape[0] != bases[1].modes.shape[0]:
             raise ValueError("POD models require equally ranked u/v bases")
+        kind = (kind or "fno").lower().replace("_", "-")
+        if kind.startswith("pod-"):
+            kind = kind.removeprefix("pod-")
+        if kind == "transolver":
+            kind = "itransolver"
         self.kind, self.rank = kind, bases[0].modes.shape[0]
         self.input_steps, self.output_steps = input_steps, output_steps
         self.register_buffer("mean", torch.from_numpy(np.stack([basis.mean for basis in bases]).astype(np.float32)))
@@ -563,6 +621,42 @@ class PODModel(nn.Module):
             raise ValueError(f"expected {self.input_steps} input steps")
         coefficients = self.coeff(x)
         return self.field(self._forecast_coefficients(coefficients), height, width)
+
+
+class PODiTransolver(PODModel):
+    """Proper Orthogonal Decomposition + Inverted Transolver (POD-iTransolver).
+
+    Projects spatiotemporal velocity fields onto orthonormal POD modes, treats
+    modal coefficient temporal evolutions as inverted tokens, and predicts
+    multivariate modal dynamics using Transolver's physics-attention.
+    """
+    def __init__(
+        self,
+        bases,
+        width: int = 32,
+        input_steps: int = 20,
+        output_steps: int = 20,
+        depth: int = 3,
+        heads: int = 4,
+        slice_num: int = 16,
+        dropout: float = 0.0,
+        **kwargs,
+    ):
+        super().__init__(
+            bases=bases,
+            kind="itransolver",
+            width=width,
+            input_steps=input_steps,
+            output_steps=output_steps,
+            depth=depth,
+            heads=heads,
+            slice_num=slice_num,
+            dropout=dropout,
+            **kwargs,
+        )
+
+
+PODTransolver = PODiTransolver
 
 
 class ContinuousNeuralFieldDecoder(nn.Module):
@@ -765,7 +859,7 @@ class TriadMNO(nn.Module):
 
 
 def build_model(name, bases=None, width=32, input_steps=20, output_steps=20, **options):
-    name = name.lower()
+    name = name.lower().replace("_", "-")
     common = {"width": width, "input_steps": input_steps, "output_steps": output_steps}
     if name == "unet":
         return SimpleUNet(2, width, input_steps=input_steps, output_steps=output_steps)
@@ -773,9 +867,9 @@ def build_model(name, bases=None, width=32, input_steps=20, output_steps=20, **o
         return FNO2d(**common)
     if name == "afno":
         return AFNO2d(**common, layers=int(options.get("depth", 4)))
-    if name == "itransolver":
+    if name in {"itransolver", "inverted-transolver"}:
         return InvertedTransolver(**common, depth=int(options.get("depth", 3)), heads=int(options.get("heads", 4)), dropout=float(options.get("dropout", 0.0)), slice_num=int(options.get("slice_num", 32)))
-    if name in {"triad-mno", "triad_mno"}:
+    if name in {"triad-mno"}:
         if bases is None:
             raise ValueError("Triad-MNO requires fitted bases")
         return TriadMNO(
@@ -792,12 +886,30 @@ def build_model(name, bases=None, width=32, input_steps=20, output_steps=20, **o
             micro_operator=options.get("micro_operator", "fno"),
             native_resolution=options.get("native_resolution", None),
         )
+    if name in {"pod-itransolver", "pod-transolver"}:
+        if bases is None:
+            raise ValueError("POD models require fitted bases")
+        return PODiTransolver(
+            bases,
+            **common,
+            depth=int(options.get("depth", 3)),
+            heads=int(options.get("heads", 4)),
+            dropout=float(options.get("dropout", 0.0)),
+            slice_num=int(options.get("slice_num", 16)),
+        )
     if name.startswith("pod-"):
         if bases is None:
             raise ValueError("POD models require fitted bases")
         kind = name.removeprefix("pod-")
-        if kind == "transolver":
-            kind = "itransolver"
+        if kind in ("transolver", "itransolver"):
+            return PODiTransolver(
+                bases,
+                **common,
+                depth=int(options.get("depth", 3)),
+                heads=int(options.get("heads", 4)),
+                dropout=float(options.get("dropout", 0.0)),
+                slice_num=int(options.get("slice_num", 16)),
+            )
         return PODModel(
             bases,
             kind=kind,

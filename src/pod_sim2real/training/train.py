@@ -172,7 +172,10 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         elif "triad" in inferred:
             model_name = "triad-mno"
         elif "transolver" in inferred:
-            model_name = "pod-transolver" if "pod" in inferred else "itransolver"
+            if "pod" in inferred:
+                model_name = "pod-itransolver" if "itransolver" in inferred else "pod-transolver"
+            else:
+                model_name = "itransolver"
         elif "itransformer" in inferred:
             model_name = "pod-itransformer"
         else:
