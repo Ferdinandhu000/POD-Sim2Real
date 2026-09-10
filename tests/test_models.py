@@ -55,7 +55,8 @@ def test_triad_mno_freeze_macro():
         assert not p.requires_grad
     for p in model.macro_proj.parameters():
         assert not p.requires_grad
-    for p in model.neural_field.parameters():
+    micro_head = model.neural_field if getattr(model, "neural_field", None) is not None else model.micro_linear_head
+    for p in micro_head.parameters():
         assert p.requires_grad
     model.freeze_macro(False)
     for p in model.macro_net.parameters():

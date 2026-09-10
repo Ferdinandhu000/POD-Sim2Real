@@ -47,3 +47,5 @@ model:
   heads: 4
   macro_rank: 32
   micro_rank: 32
+  use_triad_attn: true
+  use_continuous_field: false
