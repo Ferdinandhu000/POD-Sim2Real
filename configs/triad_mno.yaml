@@ -11,10 +11,10 @@ data:
   prefix_frames: null
 
 training:
-  pretrain_epochs: 1000
-  finetune_epochs: 1000
+  pretrain_epochs: 100
+  finetune_epochs: 100
   batch_size: 128
-  patience: 20
+  patience: 10
   num_workers: 4
   persistent_workers: true
   prefetch_factor: 1
@@ -27,7 +27,7 @@ training:
   freeze_macro: true
 
 optimizer:
-  lr: 0.0002
+  lr: 0.01
   weight_decay: 0.0001
 
 loss:
