@@ -12,17 +12,17 @@ data:
   refit_real_basis: false
   prefix_frames: null
 training:
-  pretrain_epochs: 1000
-  finetune_epochs: 1000
+  pretrain_epochs: 100
+  finetune_epochs: 100
   batch_size: 128
-  patience: 20
+  patience: 10
   num_workers: 4
   seed: 42
   device: cuda
   use_amp: true
   grad_clip: 1.0
 optimizer:
-  lr: 0.0002
+  lr: 0.01
   weight_decay: 0.0001
 loss:
   tke_weight: 0.05
@@ -34,6 +34,8 @@ logging:
   save_epoch_checkpoints: true
   tensorboard: false
 model:
-  name: pod-afno
+  name: pod-itransolver
   width: 32
   depth: 3
+  heads: 4
+  slice_num: 16

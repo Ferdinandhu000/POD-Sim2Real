@@ -21,7 +21,7 @@ training:
   device: cuda
   use_amp: true
   grad_clip: 1.0
-  freeze_macro: true
+  freeze_macro: false
 optimizer:
   lr: 0.01
   weight_decay: 0.0001
