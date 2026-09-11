@@ -12,8 +12,8 @@ data:
   refit_real_basis: false
   prefix_frames: null
 training:
-  pretrain_epochs: 1000
-  finetune_epochs: 1000
+  pretrain_epochs: 200
+  finetune_epochs: 200
   batch_size: 128
   patience: 20
   num_workers: 4

@@ -12,8 +12,8 @@ data:
   refit_real_basis: false
   prefix_frames: null
 training:
-  pretrain_epochs: 100
-  finetune_epochs: 100
+  pretrain_epochs: 200
+  finetune_epochs: 200
   batch_size: 128
   patience: 10
   num_workers: 4
@@ -23,7 +23,7 @@ training:
   grad_clip: 1.0
   freeze_macro: true
 optimizer:
-  lr: 0.01
+  lr: 0.0002
   weight_decay: 0.0001
 loss:
   tke_weight: 0.05

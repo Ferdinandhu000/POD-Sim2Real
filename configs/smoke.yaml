@@ -13,8 +13,8 @@ data:
   pod_rank: 8
   refit_real_basis: false
 training:
-  pretrain_epochs: 2
-  finetune_epochs: 2
+  pretrain_epochs: 200
+  finetune_epochs: 200
   batch_size: 2
   patience: 2
   num_workers: 0
