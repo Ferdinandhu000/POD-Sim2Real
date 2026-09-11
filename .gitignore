@@ -1,7 +1,9 @@
 # 1. 实验运行产物与权重
 artifacts/
 best_checkpoints/
+best_checkpoints_*/
 runs/
+runs_*/
 *.pt
 *.pth
 *.npz

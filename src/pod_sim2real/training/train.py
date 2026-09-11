@@ -24,7 +24,12 @@ from ..data import (
 )
 from ..data.arrow_dataset import _load_index_trajectory_ids
 from ..data.splits import split_settings
-from ..model import build_model, fit_pod_bases, fit_pod_bases_from_dataset
+from ..model import (
+    build_model,
+    fit_joint_pod_bases_from_datasets,
+    fit_pod_bases,
+    fit_pod_bases_from_dataset,
+)
 from .logging_utils import make_logger
 from .trainer import evaluate_model, train_stage
 
@@ -330,8 +335,23 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
             "real_windows": {k: len(v) for k, v in real_ds.items()},
             "resolution": list(resolution), "stride": stride,
         }
+        use_joint_basis = bool(data.get("use_joint_basis", False))
+        manifest["use_joint_basis"] = use_joint_basis
         if model_name.startswith("pod-") or "triad" in model_name:
-            bases = fit_pod_bases_from_dataset(sim_ds["train"], int(data.get("pod_rank", 32)), max_samples=int(data.get("pod_fit_samples", 64)))
+            if use_joint_basis:
+                logger.info("Fitting balanced joint POD bases from sim_train + real_train...")
+                bases = fit_joint_pod_bases_from_datasets(
+                    sim_ds["train"],
+                    real_ds["train"],
+                    int(data.get("pod_rank", 32)),
+                    max_samples_per_domain=int(data.get("pod_fit_samples", 64)),
+                )
+            else:
+                bases = fit_pod_bases_from_dataset(
+                    sim_ds["train"],
+                    int(data.get("pod_rank", 32)),
+                    max_samples=int(data.get("pod_fit_samples", 64)),
+                )
     elif official and split_mode == "official_index":
         sim_ds = {
             s: _official_dataset(
@@ -372,8 +392,23 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
             for s in ("train", "val", "test")
         }
         manifest = {"split_mode": "official_index", "prefix_frames": prefix_frames, "test_mode": test_mode, "index_root": str(index_root), "real_dir": str(real_dir), "sim_dir": str(sim_dir), "sim_windows": {k: len(v) for k, v in sim_ds.items()}, "real_windows": {k: len(v) for k, v in real_ds.items()}, "resolution": list(resolution), "stride": stride}
+        use_joint_basis = bool(data.get("use_joint_basis", False))
+        manifest["use_joint_basis"] = use_joint_basis
         if model_name.startswith("pod-") or "triad" in model_name:
-            bases = fit_pod_bases_from_dataset(sim_ds["train"], int(data.get("pod_rank", 32)), max_samples=int(data.get("pod_fit_samples", 64)))
+            if use_joint_basis:
+                logger.info("Fitting balanced joint POD bases from sim_train + real_train...")
+                bases = fit_joint_pod_bases_from_datasets(
+                    sim_ds["train"],
+                    real_ds["train"],
+                    int(data.get("pod_rank", 32)),
+                    max_samples_per_domain=int(data.get("pod_fit_samples", 64)),
+                )
+            else:
+                bases = fit_pod_bases_from_dataset(
+                    sim_ds["train"],
+                    int(data.get("pod_rank", 32)),
+                    max_samples=int(data.get("pod_fit_samples", 64)),
+                )
     elif split_mode == "official_index":
         raise ValueError("split_mode='official_index' requires the complete official index files")
     else:
@@ -384,9 +419,19 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         from ..data.arrow_dataset import ArrowWindowDataset
         sim_ds = {"train": ArrowWindowDataset(sim_train, input_steps, output_steps, stride, resolution), "val": ArrowWindowDataset(sim_val, input_steps, output_steps, stride, resolution)}
         real_ds = {"train": ArrowWindowDataset(real_train, input_steps, output_steps, stride, resolution), "val": ArrowWindowDataset(real_val, input_steps, output_steps, stride, resolution)}
-        manifest = {"split_mode": "setting_fallback", "prefix_frames": prefix_frames, "sim_train": [x.sim_id for x in sim_train], "sim_val": [x.sim_id for x in sim_val], "real_train": [x.sim_id for x in real_train], "real_val": [x.sim_id for x in real_val], "resolution": list(resolution), "stride": stride}
+        use_joint_basis = bool(data.get("use_joint_basis", False))
+        manifest = {"split_mode": "setting_fallback", "prefix_frames": prefix_frames, "use_joint_basis": use_joint_basis, "sim_train": [x.sim_id for x in sim_train], "sim_val": [x.sim_id for x in sim_val], "real_train": [x.sim_id for x in real_train], "real_val": [x.sim_id for x in real_val], "resolution": list(resolution), "stride": stride}
         if model_name.startswith("pod-") or "triad" in model_name:
-            bases = fit_pod_bases(sim_train, int(data.get("pod_rank", 32)), resolution)
+            if use_joint_basis:
+                logger.info("Fitting balanced joint POD bases from sim_train + real_train...")
+                bases = fit_joint_pod_bases_from_datasets(
+                    sim_ds["train"],
+                    real_ds["train"],
+                    int(data.get("pod_rank", 32)),
+                    max_samples_per_domain=int(data.get("pod_fit_samples", 64)),
+                )
+            else:
+                bases = fit_pod_bases(sim_train, int(data.get("pod_rank", 32)), resolution)
     manifest["seed"] = seed
     (out / "split_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     (out / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
@@ -570,6 +615,18 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         if (logs_src / "train.log").exists():
             shutil.copy2(logs_src / "train.log", best_checkpoints_root / "train.log")
 
+    for stage_name in ("pretrain_sim", "finetune_real"):
+        stage_dir = out / stage_name
+        if stage_dir.exists():
+            stage_dst = best_checkpoints_root / stage_name
+            stage_dst.mkdir(exist_ok=True)
+            for fname in ("history.json", "metrics.jsonl"):
+                if (stage_dir / fname).exists():
+                    shutil.copy2(stage_dir / fname, stage_dst / fname)
+            if (stage_dir / "logs" / "train.log").exists():
+                (stage_dst / "logs").mkdir(exist_ok=True)
+                shutil.copy2(stage_dir / "logs" / "train.log", stage_dst / "logs" / "train.log")
+
     if (out / "config.yaml").exists():
         shutil.copy2(out / "config.yaml", best_checkpoints_root / "config.yaml")
     if (out / "results.json").exists():
@@ -591,6 +648,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         f"Run Name: {run_name}",
         f"Model: {model_name}",
         f"Prefix Frames: {prefix_frames}",
+        f"Joint POD Basis: {use_joint_basis}",
         f"Finetune Real Best Epoch: {real_best_epoch}",
         f"Finetune Real Best Val Loss: {best_real:.6g}",
         f"Early Stopping Patience: {patience}",

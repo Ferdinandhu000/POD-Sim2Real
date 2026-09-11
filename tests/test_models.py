@@ -138,6 +138,27 @@ def test_pod_transolver_and_itransolver_distinct():
     out_fwd.sum().backward()
 
 
+def test_fit_joint_pod_bases_from_datasets():
+    from pod_sim2real.model import fit_joint_pod_bases_from_datasets
+    # Create synthetic sim and real datasets
+    class DummyDataset(torch.utils.data.Dataset):
+        def __init__(self, shift=0.0):
+            self.shift = shift
+        def __len__(self):
+            return 8
+        def __getitem__(self, idx):
+            x = torch.randn(4, 2, 8, 12) + self.shift
+            y = torch.randn(4, 2, 8, 12) + self.shift
+            return x, y, idx
 
+    sim_ds = DummyDataset(shift=1.0)
+    real_ds = DummyDataset(shift=-1.0)
 
-
+    bases = fit_joint_pod_bases_from_datasets(sim_ds, real_ds, rank=4, max_samples_per_domain=4)
+    assert len(bases) == 2
+    for b in bases:
+        assert b.mean.shape == (8 * 12,)
+        assert b.modes.shape == (4, 8 * 12)
+        # Check orthonormality of modes: M @ M.T should be identity
+        eye = b.modes @ b.modes.T
+        assert np.allclose(eye, np.eye(4), atol=1e-5)

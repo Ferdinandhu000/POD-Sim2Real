@@ -61,6 +61,24 @@ def fit_pod_bases_from_dataset(dataset, rank=32, max_samples=64):
     return tuple(_fit_pod(np.concatenate(channel, axis=0).astype(np.float32, copy=False), rank) for channel in samples)
 
 
+def fit_joint_pod_bases_from_datasets(sim_dataset, real_dataset, rank=32, max_samples_per_domain=64):
+    """Fit balanced joint POD bases from both sim and real training splits."""
+    if max_samples_per_domain < 1:
+        raise ValueError("max_samples_per_domain must be positive")
+    samples = [[], []]
+    for ds in (sim_dataset, real_dataset):
+        count = min(len(ds), max_samples_per_domain)
+        for index in np.linspace(0, len(ds) - 1, count, dtype=int):
+            x, y, _ = ds[int(index)]
+            if isinstance(x, torch.Tensor):
+                fields = torch.cat((x, y), dim=0).detach().cpu().numpy()
+            else:
+                fields = np.concatenate((x, y), axis=0)
+            for channel in range(2):
+                samples[channel].append(fields[:, channel].reshape(fields.shape[0], -1))
+    return tuple(_fit_pod(np.concatenate(channel, axis=0).astype(np.float32, copy=False), rank) for channel in samples)
+
+
 class SimpleUNet(nn.Module):
     """Standard 2D U-Net forecasting model across space with time mapped through channels."""
     def __init__(self, channels=2, width=32, input_steps=20, output_steps=20, out_channels=None):

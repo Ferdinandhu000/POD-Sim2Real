@@ -111,3 +111,73 @@ def test_triad_mno_macro_only_freeze():
     model.freeze_macro(True)
     trainable = [p for p in model.parameters() if p.requires_grad]
     assert len(trainable) > 0, "macro_only model should not have 0 trainable parameters after freeze_macro"
+
+
+def test_joint_pod_basis_training(tmp_path):
+    cfg_dir = tmp_path / "mock_yamls"
+    cfg_dir.mkdir()
+    runs_dir = tmp_path / "runs"
+    best_dir = tmp_path / "best_checkpoints"
+
+    cfg = {
+        "data": {
+            "use_official_indices": False,
+            "split_mode": "setting",
+            "real_dir": "data/data_real",
+            "sim_dir": "data/data_sim",
+            "val_settings": 1,
+            "input_steps": 20,
+            "output_steps": 20,
+            "resolution": [32, 64],
+            "stride": 400,
+            "pod_rank": 8,
+            "prefix_frames": 2000,
+            "use_joint_basis": True,
+        },
+        "training": {
+            "pretrain_epochs": 1,
+            "finetune_epochs": 1,
+            "batch_size": 2,
+            "patience": 1,
+            "num_workers": 0,
+            "seed": 42,
+            "device": "cpu",
+            "use_amp": False,
+        },
+        "optimizer": {"lr": 0.001, "weight_decay": 0.0},
+        "loss": {"use_tke": False, "use_vorticity": False},
+        "logging": {"use_tqdm": False, "save_epoch_checkpoints": False},
+        "model": {"name": "pod-fno", "width": 8, "modes": 4},
+        "output_dir": str(runs_dir),
+        "best_checkpoints_dir": str(best_dir),
+    }
+
+    cfg_path = cfg_dir / "01_test_joint_podfno_config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    class MockArgs:
+        model = None
+        data_root = Path.cwd()
+        output_dir = runs_dir
+        best_checkpoints_dir = best_dir
+        resolution = None
+        stride = None
+        epochs = 1
+        batch_size = None
+        device = "cpu"
+        seed = 42
+        num_workers = 0
+        resume = None
+        test_mode = None
+        prefix_frames = None
+
+    res = run_single_config(cfg_path, MockArgs())
+    assert res["model"] == "pod-fno"
+
+    target_best = best_dir / "01_test_joint_podfno_config"
+    assert (target_best / "pod_u.npz").exists()
+    assert (target_best / "pod_v.npz").exists()
+    info_text = (target_best / "info.txt").read_text(encoding="utf-8")
+    assert "Joint POD Basis: True" in info_text
+    manifest = json.loads((target_best / "split_manifest.json").read_text(encoding="utf-8"))
+    assert manifest.get("use_joint_basis") is True

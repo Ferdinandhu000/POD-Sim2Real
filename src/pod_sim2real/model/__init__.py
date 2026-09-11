@@ -8,6 +8,7 @@ from .models import (
     TriadMNO,
     build_coeff_operator,
     build_model,
+    fit_joint_pod_bases_from_datasets,
     fit_pod_bases,
     fit_pod_bases_from_dataset,
     iTransolver1dCoeff,
@@ -26,4 +27,5 @@ __all__ = [
     "TriadMNO",
     "fit_pod_bases",
     "fit_pod_bases_from_dataset",
+    "fit_joint_pod_bases_from_datasets",
 ]
