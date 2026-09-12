@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 import yaml
 
-from ..data import OfficialArrowWindowDataset
+from ..data import GaussianNormalizer, OfficialArrowWindowDataset
 from ..model import PODBasis, build_model
 from .train import MODELS, _official_dataset, _resolve_data_layout
 from .trainer import evaluate_model
@@ -130,6 +130,20 @@ def evaluate_all_checkpoints(
         model.load_state_dict(state, strict=False)
         model.to(device).eval()
 
+        # Load normalizer if present
+        normalizer = None
+        norm_path = model_dir / "normalization.pt"
+        if not norm_path.exists() and model_dir.parent.exists():
+            norm_path = model_dir.parent / "normalization.pt"
+        if norm_path.exists():
+            try:
+                norm_dict = torch.load(norm_path, map_location="cpu", weights_only=False)
+                if isinstance(norm_dict, dict) and norm_dict.get("normalizer_type") == "gaussian" and "mean" in norm_dict and "std" in norm_dict:
+                    normalizer = GaussianNormalizer.from_state_dict(norm_dict, device=device)
+                    print(f"Loaded GaussianNormalizer from {norm_path}")
+            except Exception as e:
+                print(f"Notice: could not load normalizer from {norm_path}: {e}")
+
         # Evaluate across subsets
         subsets = ["all", "in_dist", "out_dist", "seen"] if index_root else ["all"]
         model_metrics = {}
@@ -144,7 +158,7 @@ def evaluate_all_checkpoints(
                     real_trajs = discover_trajectories(real_dir, "real")
                     stride = int(data_cfg.get("stride", 20))
                     sub_ds = ArrowWindowDataset(real_trajs, input_steps, output_steps, stride, resolution)
-                m = evaluate_model(model, sub_ds, device, batch_size, num_workers)
+                m = evaluate_model(model, sub_ds, device, batch_size, num_workers, normalizer=normalizer)
                 m["windows"] = len(sub_ds)
                 model_metrics[sub] = m
 

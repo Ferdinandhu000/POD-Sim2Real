@@ -181,3 +181,97 @@ def test_joint_pod_basis_training(tmp_path):
     assert "Joint POD Basis: True" in info_text
     manifest = json.loads((target_best / "split_manifest.json").read_text(encoding="utf-8"))
     assert manifest.get("use_joint_basis") is True
+
+
+def test_v4_models_training_pipeline(tmp_path):
+    cfg_dir = tmp_path / "mock_yamls_v4"
+    cfg_dir.mkdir()
+    runs_dir = tmp_path / "runs_v4"
+    best_dir = tmp_path / "best_checkpoints_v4"
+
+    base_dict = {
+        "data": {
+            "use_official_indices": False,
+            "split_mode": "setting",
+            "real_dir": "data/data_real",
+            "sim_dir": "data/data_sim",
+            "val_settings": 1,
+            "input_steps": 20,
+            "output_steps": 20,
+            "resolution": [32, 64],
+            "stride": 400,
+            "pod_rank": 8,
+            "prefix_frames": 2000,
+            "use_joint_basis": True,
+        },
+        "training": {
+            "pretrain_epochs": 1,
+            "finetune_epochs": 1,
+            "batch_size": 2,
+            "patience": 1,
+            "num_workers": 0,
+            "seed": 42,
+            "device": "cpu",
+            "use_amp": False,
+        },
+        "optimizer": {"lr": 0.001, "weight_decay": 0.0},
+        "loss": {"use_tke": False, "use_vorticity": False},
+        "logging": {"use_tqdm": False, "save_epoch_checkpoints": False},
+        "output_dir": str(runs_dir),
+        "best_checkpoints_dir": str(best_dir),
+    }
+
+    # Test Triad-AFNO
+    cfg_triad = dict(base_dict)
+    cfg_triad["model"] = {
+        "name": "triad-afno",
+        "width": 16,
+        "depth": 2,
+        "heads": 2,
+        "macro_rank": 4,
+        "micro_rank": 4,
+        "mode_layout": "grid2d",
+    }
+    cfg_path = cfg_dir / "09_test_triadafno.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg_triad), encoding="utf-8")
+
+    class MockArgs:
+        model = None
+        data_root = Path.cwd()
+        output_dir = runs_dir
+        best_checkpoints_dir = best_dir
+        resolution = None
+        stride = None
+        epochs = 1
+        batch_size = None
+        device = "cpu"
+        seed = 42
+        num_workers = 0
+        resume = None
+        test_mode = None
+        prefix_frames = None
+
+    res = run_single_config(cfg_path, MockArgs())
+    assert res["model"] == "triad-afno"
+    assert (best_dir / "09_test_triadafno" / "best.pt").exists()
+    assert (best_dir / "09_test_triadafno" / "info.txt").exists()
+
+    # Test FNO3d (RealPDEBench exact implementation)
+    cfg_fno = dict(base_dict)
+    cfg_fno["model"] = {
+        "name": "fno3d",
+        "width": 16,
+        "depth": 2,
+        "modes_t": 2,
+        "modes_h": 4,
+        "modes_w": 4,
+    }
+    cfg_fno_path = cfg_dir / "01_test_fno3d.yaml"
+    cfg_fno_path.write_text(yaml.safe_dump(cfg_fno), encoding="utf-8")
+
+    res_fno = run_single_config(cfg_fno_path, MockArgs())
+    assert res_fno["model"] == "fno3d"
+    assert (best_dir / "01_test_fno3d" / "best.pt").exists()
+
+
+

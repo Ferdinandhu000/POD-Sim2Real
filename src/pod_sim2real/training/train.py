@@ -16,8 +16,11 @@ import torch
 import yaml
 
 from ..data import (
+    GaussianNormalizer,
+    IdentityNormalizer,
     OfficialArrowWindowDataset,
     PrecomputedTrajectoryDataset,
+    build_normalizer,
     build_trajectory_prefix_entries,
     discover_trajectories,
     preprocess_domain,
@@ -45,6 +48,10 @@ MODELS = (
     "pod-itransolver",
     "pod-transolver",
     "triad-mno",
+    "triad-afno",
+    "fno3d",
+    "unet3d",
+    "afno3d",
 )
 
 
@@ -158,8 +165,21 @@ def _official_dataset(
         cache_trajectories=cache_trajectories,
         max_cache_trajectories=max_cache_trajectories,
         in_memory=in_memory,
-        mmap=mmap,
     )
+
+
+def _setup_normalizer(data_cfg: dict, dataset, device: torch.device, logger) -> GaussianNormalizer | None:
+    normalizer_type = str(data_cfg.get("normalizer", "none")).lower().strip()
+    if normalizer_type == "gaussian":
+        logger.info("Computing Gaussian channel normalizer from training data...")
+        normalizer = GaussianNormalizer.from_dataset(
+            dataset,
+            device=device,
+            max_samples=int(data_cfg.get("normalizer_samples", 128)),
+        )
+        logger.info("GaussianNormalizer computed: mean=%s, std=%s", normalizer.mean.tolist(), normalizer.std.tolist())
+        return normalizer
+    return None
 
 
 def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
@@ -337,6 +357,9 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         }
         use_joint_basis = bool(data.get("use_joint_basis", False))
         manifest["use_joint_basis"] = use_joint_basis
+        normalizer_type = str(data.get("normalizer", "none")).lower().strip()
+        normalizer = _setup_normalizer(data, sim_ds["train"], device, logger)
+        manifest["normalizer"] = normalizer_type
         if model_name.startswith("pod-") or "triad" in model_name:
             if use_joint_basis:
                 logger.info("Fitting balanced joint POD bases from sim_train + real_train...")
@@ -345,12 +368,14 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
                     real_ds["train"],
                     int(data.get("pod_rank", 32)),
                     max_samples_per_domain=int(data.get("pod_fit_samples", 64)),
+                    normalizer=normalizer,
                 )
             else:
                 bases = fit_pod_bases_from_dataset(
                     sim_ds["train"],
                     int(data.get("pod_rank", 32)),
                     max_samples=int(data.get("pod_fit_samples", 64)),
+                    normalizer=normalizer,
                 )
     elif official and split_mode == "official_index":
         sim_ds = {
@@ -394,6 +419,9 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         manifest = {"split_mode": "official_index", "prefix_frames": prefix_frames, "test_mode": test_mode, "index_root": str(index_root), "real_dir": str(real_dir), "sim_dir": str(sim_dir), "sim_windows": {k: len(v) for k, v in sim_ds.items()}, "real_windows": {k: len(v) for k, v in real_ds.items()}, "resolution": list(resolution), "stride": stride}
         use_joint_basis = bool(data.get("use_joint_basis", False))
         manifest["use_joint_basis"] = use_joint_basis
+        normalizer_type = str(data.get("normalizer", "none")).lower().strip()
+        normalizer = _setup_normalizer(data, sim_ds["train"], device, logger)
+        manifest["normalizer"] = normalizer_type
         if model_name.startswith("pod-") or "triad" in model_name:
             if use_joint_basis:
                 logger.info("Fitting balanced joint POD bases from sim_train + real_train...")
@@ -402,12 +430,14 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
                     real_ds["train"],
                     int(data.get("pod_rank", 32)),
                     max_samples_per_domain=int(data.get("pod_fit_samples", 64)),
+                    normalizer=normalizer,
                 )
             else:
                 bases = fit_pod_bases_from_dataset(
                     sim_ds["train"],
                     int(data.get("pod_rank", 32)),
                     max_samples=int(data.get("pod_fit_samples", 64)),
+                    normalizer=normalizer,
                 )
     elif split_mode == "official_index":
         raise ValueError("split_mode='official_index' requires the complete official index files")
@@ -420,7 +450,9 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         sim_ds = {"train": ArrowWindowDataset(sim_train, input_steps, output_steps, stride, resolution), "val": ArrowWindowDataset(sim_val, input_steps, output_steps, stride, resolution)}
         real_ds = {"train": ArrowWindowDataset(real_train, input_steps, output_steps, stride, resolution), "val": ArrowWindowDataset(real_val, input_steps, output_steps, stride, resolution)}
         use_joint_basis = bool(data.get("use_joint_basis", False))
-        manifest = {"split_mode": "setting_fallback", "prefix_frames": prefix_frames, "use_joint_basis": use_joint_basis, "sim_train": [x.sim_id for x in sim_train], "sim_val": [x.sim_id for x in sim_val], "real_train": [x.sim_id for x in real_train], "real_val": [x.sim_id for x in real_val], "resolution": list(resolution), "stride": stride}
+        normalizer_type = str(data.get("normalizer", "none")).lower().strip()
+        normalizer = _setup_normalizer(data, sim_ds["train"], device, logger)
+        manifest = {"split_mode": "setting_fallback", "prefix_frames": prefix_frames, "use_joint_basis": use_joint_basis, "normalizer": normalizer_type, "sim_train": [x.sim_id for x in sim_train], "sim_val": [x.sim_id for x in sim_val], "real_train": [x.sim_id for x in real_train], "real_val": [x.sim_id for x in real_val], "resolution": list(resolution), "stride": stride}
         if model_name.startswith("pod-") or "triad" in model_name:
             if use_joint_basis:
                 logger.info("Fitting balanced joint POD bases from sim_train + real_train...")
@@ -429,13 +461,18 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
                     real_ds["train"],
                     int(data.get("pod_rank", 32)),
                     max_samples_per_domain=int(data.get("pod_fit_samples", 64)),
+                    normalizer=normalizer,
                 )
             else:
-                bases = fit_pod_bases(sim_train, int(data.get("pod_rank", 32)), resolution)
+                bases = fit_pod_bases(sim_train, int(data.get("pod_rank", 32)), resolution, normalizer=normalizer)
     manifest["seed"] = seed
     (out / "split_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     (out / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
-    torch.save({"resolution": list(resolution), "channels": ["u", "v"]}, out / "normalization.pt")
+    norm_payload = {"resolution": list(resolution), "channels": ["u", "v"], "normalizer_type": normalizer_type}
+    if normalizer is not None and hasattr(normalizer, "mean") and normalizer.mean is not None:
+        norm_payload["mean"] = normalizer.mean.detach().cpu()
+        norm_payload["std"] = normalizer.std.detach().cpu()
+    torch.save(norm_payload, out / "normalization.pt")
     if bases is not None:
         basis_dir = out / "pod_basis"
         basis_dir.mkdir(exist_ok=True)
@@ -446,7 +483,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
     real_bases = bases
     if refit_real_basis and (model_name.startswith("pod-") or "triad" in model_name):
         real_bases = fit_pod_bases_from_dataset(
-            real_ds["train"], int(data.get("pod_rank", 32)), max_samples=int(data.get("pod_fit_samples", 64))
+            real_ds["train"], int(data.get("pod_rank", 32)), max_samples=int(data.get("pod_fit_samples", 64)), normalizer=normalizer
         )
         real_basis_dir = out / "pod_basis_real"
         real_basis_dir.mkdir(exist_ok=True)
@@ -458,7 +495,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         stage_dir.mkdir(parents=True, exist_ok=True)
         (stage_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
         (stage_dir / "split_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        torch.save({"resolution": list(resolution), "channels": ["u", "v"]}, stage_dir / "normalization.pt")
+        torch.save(norm_payload, stage_dir / "normalization.pt")
         if stage_bases is not None:
             stage_bases[0].save(stage_dir / "pod_u.npz")
             stage_bases[1].save(stage_dir / "pod_v.npz")
@@ -490,6 +527,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         model_options = dict(cfg.get("model", {}))
         model_options.pop("width", None)
         model_options.pop("name", None)
+        model_options.setdefault("resolution", tuple(resolution))
         model = build_model(
             model_name,
             stage_bases,
@@ -502,7 +540,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
             if hasattr(model, "freeze_macro"):
                 model.freeze_macro(True)
                 stage_logger.info("Strategy A active: Macro physical backbone frozen for finetune_real")
-        return train_stage(model, train_ds, val_ds, stage_dir, params, stage, device, initial)
+        return train_stage(model, train_ds, val_ds, stage_dir, params, stage, device, initial, normalizer=normalizer)
 
     sim_epochs = int(args.epochs) if args.epochs is not None else int(training.get("pretrain_epochs", epochs))
     real_epochs = int(args.epochs) if args.epochs is not None else int(training.get("finetune_epochs", epochs))
@@ -539,6 +577,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         model_options = dict(cfg.get("model", {}))
         model_options.pop("width", None)
         model_options.pop("name", None)
+        model_options.setdefault("resolution", tuple(resolution))
         test_model = build_model(
             model_name,
             real_bases,
@@ -549,7 +588,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
         )
         test_model.load_state_dict(real_state, strict=False)
 
-        primary_metrics = evaluate_model(test_model, real_ds[eval_split], device, batch, workers)
+        primary_metrics = evaluate_model(test_model, real_ds[eval_split], device, batch, workers, normalizer=normalizer)
         result[f"real_{eval_split}_mse"] = primary_metrics["mse"]
         result[f"real_{eval_split}_metrics"] = primary_metrics
         result[f"real_{eval_split}_windows"] = len(real_ds[eval_split])
@@ -573,7 +612,7 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
                         in_memory=in_memory,
                         mmap=mmap,
                     )
-                    m = evaluate_model(test_model, sub_ds, device, batch, workers)
+                    m = evaluate_model(test_model, sub_ds, device, batch, workers, normalizer=normalizer)
                     m["windows"] = len(sub_ds)
                     subsets_metrics[sub] = m
                 except Exception as e:

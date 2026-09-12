@@ -31,13 +31,15 @@ def _loader_kwargs(config, device, *, shuffle):
     return kwargs
 
 
-def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initial=None):
+def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initial=None, normalizer=None):
     stage_dir = Path(stage_dir)
     (stage_dir / "logs").mkdir(parents=True, exist_ok=True)
     logger = config["logger"]
     if initial is not None:
         model.load_state_dict(initial, strict=False)
     model.to(device)
+    if normalizer is not None:
+        normalizer = normalizer.to(device)
     loader = DataLoader(train_ds, **_loader_kwargs(config, device, shuffle=True))
     val_loader = DataLoader(val_ds, **_loader_kwargs(config, device, shuffle=False))
     trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -85,6 +87,8 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
         for x, y, _ in bar:
             x = x.to(device, non_blocking=bool(config.get("non_blocking", True)))
             y = y.to(device, non_blocking=bool(config.get("non_blocking", True)))
+            if normalizer is not None:
+                x, y = normalizer.preprocess(x, y)
             opt.zero_grad(set_to_none=True)
             with _autocast():
                 pred = model(x)
@@ -119,6 +123,8 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
             for x, y, _ in tqdm(val_loader, desc=f"{stage} Epoch {epoch:03d}/{epochs:03d} val", leave=False):
                 x = x.to(device, non_blocking=bool(config.get("non_blocking", True)))
                 y = y.to(device, non_blocking=bool(config.get("non_blocking", True)))
+                if normalizer is not None:
+                    x, y = normalizer.preprocess(x, y)
                 with _autocast():
                     pred = model(x)
                 val_sum += torch.nn.functional.mse_loss(pred.float(), y.float()).item() * len(x)
@@ -180,7 +186,7 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
     return model.state_dict(), best, best_epoch
 
 
-def evaluate_model(model, dataset, device, batch_size=1, num_workers=0) -> dict[str, float]:
+def evaluate_model(model, dataset, device, batch_size=1, num_workers=0, normalizer=None) -> dict[str, float]:
     """Evaluate comprehensive paper metrics on a dataset:
     Returns dict with:
     - mse
@@ -200,6 +206,8 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0) -> dict[
         eval_loader_kwargs.update({"persistent_workers": True, "prefetch_factor": 1})
     loader = DataLoader(dataset, **eval_loader_kwargs)
     model.to(device).eval()
+    if normalizer is not None:
+        normalizer = normalizer.to(device)
 
     total_sq_err = 0.0
     total_abs_err = 0.0
@@ -225,7 +233,12 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0) -> dict[
         for x, y, _ in loader:
             x = x.to(device, non_blocking=device.type == "cuda")
             y = y.to(device, non_blocking=device.type == "cuda")
-            pred = model(x)
+            if normalizer is not None:
+                x_in = normalizer.normalize(x)
+                pred_norm = model(x_in)
+                pred = normalizer.denormalize(pred_norm)
+            else:
+                pred = model(x)
             diff = pred.float() - y.float()
 
             total_sq_err += diff.square().sum().item()

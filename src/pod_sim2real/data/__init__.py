@@ -6,9 +6,10 @@ from .arrow_dataset import (
     discover_trajectories,
     split_trajectory_ids,
 )
+from .normalizer import GaussianNormalizer, IdentityNormalizer, build_normalizer
 from .pairing import pair_trajectories
-from .tensor_dataset import PrecomputedTrajectoryDataset
 from .preprocess import preprocess_domain
+from .tensor_dataset import PrecomputedTrajectoryDataset
 
 __all__ = [
     "ArrowTrajectory",
@@ -20,4 +21,7 @@ __all__ = [
     "split_trajectory_ids",
     "discover_trajectories",
     "pair_trajectories",
+    "GaussianNormalizer",
+    "IdentityNormalizer",
+    "build_normalizer",
 ]

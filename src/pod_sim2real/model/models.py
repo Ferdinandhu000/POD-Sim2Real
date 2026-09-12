@@ -36,18 +36,22 @@ def _fit_pod(values, rank):
     return PODBasis(mean.astype(np.float32), vectors[:min(rank, len(vectors))].astype(np.float32))
 
 
-def fit_pod_bases(trajectories, rank=32, resolution=(32, 64), sample_stride=10):
+def fit_pod_bases(trajectories, rank=32, resolution=(32, 64), sample_stride=10, normalizer=None):
     result = []
     for channel in range(2):
         samples = []
         for trajectory in trajectories:
             values = trajectory.fields(resolution)[:, channel].reshape(trajectory.u.shape[0], -1)
+            if normalizer is not None and hasattr(normalizer, "mean") and normalizer.mean is not None:
+                m = normalizer.mean[channel].item()
+                s = normalizer.std[channel].item()
+                values = (values - m) / s
             samples.append(values[::sample_stride].astype(np.float32))
         result.append(_fit_pod(np.concatenate(samples, axis=0), rank))
     return tuple(result)
 
 
-def fit_pod_bases_from_dataset(dataset, rank=32, max_samples=64):
+def fit_pod_bases_from_dataset(dataset, rank=32, max_samples=64, normalizer=None):
     """Fit POD bases only from bounded windows from the training split."""
     if max_samples < 1:
         raise ValueError("max_samples must be positive")
@@ -55,13 +59,23 @@ def fit_pod_bases_from_dataset(dataset, rank=32, max_samples=64):
     samples = [[], []]
     for index in np.linspace(0, len(dataset) - 1, count, dtype=int):
         x, y, _ = dataset[int(index)]
-        fields = torch.cat((x, y), dim=0).numpy()
+        if normalizer is not None:
+            if not isinstance(x, torch.Tensor):
+                x = torch.as_tensor(x, dtype=torch.float32)
+            if not isinstance(y, torch.Tensor):
+                y = torch.as_tensor(y, dtype=torch.float32)
+            x = normalizer.normalize(x)
+            y = normalizer.normalize(y)
+        if isinstance(x, torch.Tensor):
+            fields = torch.cat((x, y), dim=0).detach().cpu().numpy()
+        else:
+            fields = np.concatenate((x, y), axis=0)
         for channel in range(2):
             samples[channel].append(fields[:, channel].reshape(fields.shape[0], -1))
     return tuple(_fit_pod(np.concatenate(channel, axis=0).astype(np.float32, copy=False), rank) for channel in samples)
 
 
-def fit_joint_pod_bases_from_datasets(sim_dataset, real_dataset, rank=32, max_samples_per_domain=64):
+def fit_joint_pod_bases_from_datasets(sim_dataset, real_dataset, rank=32, max_samples_per_domain=64, normalizer=None):
     """Fit balanced joint POD bases from both sim and real training splits."""
     if max_samples_per_domain < 1:
         raise ValueError("max_samples_per_domain must be positive")
@@ -70,6 +84,13 @@ def fit_joint_pod_bases_from_datasets(sim_dataset, real_dataset, rank=32, max_sa
         count = min(len(ds), max_samples_per_domain)
         for index in np.linspace(0, len(ds) - 1, count, dtype=int):
             x, y, _ = ds[int(index)]
+            if normalizer is not None:
+                if not isinstance(x, torch.Tensor):
+                    x = torch.as_tensor(x, dtype=torch.float32)
+                if not isinstance(y, torch.Tensor):
+                    y = torch.as_tensor(y, dtype=torch.float32)
+                x = normalizer.normalize(x)
+                y = normalizer.normalize(y)
             if isinstance(x, torch.Tensor):
                 fields = torch.cat((x, y), dim=0).detach().cpu().numpy()
             else:
@@ -1002,6 +1023,51 @@ def build_model(name, bases=None, width=32, input_steps=20, output_steps=20, **o
             micro_operator=options.get("micro_operator", "fno"),
             native_resolution=options.get("native_resolution", None),
         )
+    if name in {"triad-afno"}:
+        if bases is None:
+            raise ValueError("Triad-AFNO requires fitted bases")
+        from .models_v2 import TriadAFNO
+        return TriadAFNO(
+            bases,
+            **common,
+            depth=int(options.get("depth", 3)),
+            heads=int(options.get("heads", 4)),
+            macro_rank=int(options.get("macro_rank", 32)),
+            micro_rank=int(options.get("micro_rank", 32)),
+            mode_layout=options.get("mode_layout", "grid2d"),
+            dropout=float(options.get("dropout", 0.0)),
+            sparsity_threshold=float(options.get("sparsity_threshold", 0.01)),
+        )
+    if name in {"fno3d", "fno-3d"}:
+        from .models_v2 import FNO3d
+        return FNO3d(
+            channels=2,
+            **common,
+            layers=int(options.get("depth", 4)),
+            modes_t=int(options.get("modes_t", 4)),
+            modes_h=int(options.get("modes_h", 12)),
+            modes_w=int(options.get("modes_w", 16)),
+            resolution=options.get("resolution", (64, 128)),
+        )
+    if name in {"unet3d", "unet-3d"}:
+        from .models_v2 import Unet3d
+        return Unet3d(
+            channels=2,
+            **common,
+            dim_mults=options.get("dim_mults", (1, 2, 4)),
+            resolution=options.get("resolution", (64, 128)),
+        )
+    if name in {"afno3d", "afno-3d"}:
+        from .models_v2 import AFNO3d
+        return AFNO3d(
+            channels=2,
+            **common,
+            layers=int(options.get("depth", 4)),
+            blocks=int(options.get("blocks", 8)),
+            sparsity_threshold=float(options.get("sparsity_threshold", 0.01)),
+            resolution=options.get("resolution", (64, 128)),
+        )
+
     if name == "pod-transolver":
         if bases is None:
             raise ValueError("POD models require fitted bases")

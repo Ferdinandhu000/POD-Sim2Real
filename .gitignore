@@ -2,6 +2,7 @@
 artifacts/
 best_checkpoints/
 best_checkpoints_*/
+training_results*/
 runs/
 runs_*/
 *.pt
@@ -48,3 +49,7 @@ src/iTransformer-main/
 venv/
 env/
 .DS_Store
+
+# 7. 临时分析与规划文档
+analysis_v3/
+yaml_main_v4/*.md

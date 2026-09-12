@@ -13,6 +13,7 @@ from .models import (
     fit_pod_bases_from_dataset,
     iTransolver1dCoeff,
 )
+from .models_v2 import AFNO3d, FNO3d, TriadAFNO, Unet3d
 
 __all__ = [
     "build_model",
@@ -25,6 +26,10 @@ __all__ = [
     "iTransolver1dCoeff",
     "InvertedTransolver",
     "TriadMNO",
+    "TriadAFNO",
+    "FNO3d",
+    "Unet3d",
+    "AFNO3d",
     "fit_pod_bases",
     "fit_pod_bases_from_dataset",
     "fit_joint_pod_bases_from_datasets",
