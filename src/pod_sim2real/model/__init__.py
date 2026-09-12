@@ -2,8 +2,10 @@ from .models import (
     InvertedTransolver,
     PODBasis,
     PODModel,
+    PODTransformer,
     PODTransolver,
     PODiTransolver,
+    Transformer1dCoeff,
     Transolver1dCoeff,
     TriadMNO,
     build_coeff_operator,
@@ -13,15 +15,25 @@ from .models import (
     fit_pod_bases_from_dataset,
     iTransolver1dCoeff,
 )
-from .models_v2 import AFNO3d, FNO3d, TriadAFNO, Unet3d
+from .models_v2 import (
+    AFNO3d,
+    FNO3d,
+    Transformer3d,
+    Transolver3d,
+    TriadAFNO,
+    Unet3d,
+    iTransolver3d,
+)
 
 __all__ = [
     "build_model",
     "build_coeff_operator",
     "PODBasis",
     "PODModel",
+    "PODTransformer",
     "PODiTransolver",
     "PODTransolver",
+    "Transformer1dCoeff",
     "Transolver1dCoeff",
     "iTransolver1dCoeff",
     "InvertedTransolver",
@@ -30,7 +42,11 @@ __all__ = [
     "FNO3d",
     "Unet3d",
     "AFNO3d",
+    "Transformer3d",
+    "Transolver3d",
+    "iTransolver3d",
     "fit_pod_bases",
     "fit_pod_bases_from_dataset",
     "fit_joint_pod_bases_from_datasets",
 ]
+

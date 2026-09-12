@@ -45,6 +45,7 @@ MODELS = (
     "pod-afno",
     "pod-unet",
     "pod-itransformer",
+    "pod-transformer",
     "pod-itransolver",
     "pod-transolver",
     "triad-mno",
@@ -52,7 +53,11 @@ MODELS = (
     "fno3d",
     "unet3d",
     "afno3d",
+    "transformer3d",
+    "transolver3d",
+    "itransolver3d",
 )
+
 
 
 def _resolve_data_layout(root: Path, data: dict) -> tuple[Path, Path, Path | None]:

@@ -187,6 +187,9 @@ class TriadAFNO(nn.Module):
 from .realpdebench.fno import FNO3d as RealPDEBench_FNO3d
 from .realpdebench.unet import Unet3d as RealPDEBench_Unet3d
 from .realpdebench.afno import AFNO3d as RealPDEBench_AFNO3d
+from .realpdebench.transformer import Transformer3d as RealPDEBench_Transformer3d
+from .realpdebench.transolver import Transolver3d as RealPDEBench_Transolver3d
+from .realpdebench.itransolver import iTransolver3d as RealPDEBench_iTransolver3d
 
 
 class FNO3d(nn.Module):
@@ -300,4 +303,128 @@ class AFNO3d(nn.Module):
             out = self.core(x_in)
             return out.permute(0, 1, 4, 2, 3)
         return self.core(x)
+
+
+class Transformer3d(nn.Module):
+    """3D Space-Time Transformer operator adhering to RealPDEBench conventions."""
+    def __init__(
+        self,
+        channels: int = 2,
+        width: int = 64,
+        layers: int = 4,
+        heads: int = 8,
+        patch_size: tuple[int, int] = (4, 4),
+        dropout: float = 0.0,
+        input_steps: int = 20,
+        output_steps: int = 20,
+        resolution: tuple[int, int] = (64, 128),
+        **kwargs,
+    ):
+        super().__init__()
+        self.channels = channels
+        self.input_steps = input_steps
+        self.output_steps = output_steps
+        shape_in = (input_steps, resolution[0], resolution[1], channels)
+        shape_out = (output_steps, resolution[0], resolution[1], channels)
+        self.core = RealPDEBench_Transformer3d(
+            n_layers=layers,
+            width=width,
+            heads=heads,
+            patch_size=patch_size,
+            dropout=dropout,
+            shape_in=shape_in,
+            shape_out=shape_out,
+        )
+
+    def forward(self, x):
+        if x.shape[2] == self.channels:
+            x_in = x.permute(0, 1, 3, 4, 2)
+            out = self.core(x_in)
+            return out.permute(0, 1, 4, 2, 3)
+        return self.core(x)
+
+
+class Transolver3d(nn.Module):
+    """3D Transolver Physics-Attention operator adhering to RealPDEBench conventions."""
+    def __init__(
+        self,
+        channels: int = 2,
+        width: int = 64,
+        layers: int = 4,
+        heads: int = 8,
+        slice_num: int = 32,
+        patch_size: tuple[int, int] = (2, 2),
+        dropout: float = 0.0,
+        input_steps: int = 20,
+        output_steps: int = 20,
+        resolution: tuple[int, int] = (64, 128),
+        **kwargs,
+    ):
+        super().__init__()
+        self.channels = channels
+        self.input_steps = input_steps
+        self.output_steps = output_steps
+        shape_in = (input_steps, resolution[0], resolution[1], channels)
+        shape_out = (output_steps, resolution[0], resolution[1], channels)
+        self.core = RealPDEBench_Transolver3d(
+            n_layers=layers,
+            width=width,
+            heads=heads,
+            slice_num=slice_num,
+            patch_size=patch_size,
+            dropout=dropout,
+            shape_in=shape_in,
+            shape_out=shape_out,
+        )
+
+    def forward(self, x):
+        if x.shape[2] == self.channels:
+            x_in = x.permute(0, 1, 3, 4, 2)
+            out = self.core(x_in)
+            return out.permute(0, 1, 4, 2, 3)
+        return self.core(x)
+
+
+class iTransolver3d(nn.Module):
+    """3D Inverted Transolver SOTA operator adhering to RealPDEBench conventions."""
+    def __init__(
+        self,
+        channels: int = 2,
+        width: int = 64,
+        layers: int = 4,
+        heads: int = 8,
+        slice_num: int = 32,
+        patch_size: tuple[int, int] = (2, 2),
+        dropout: float = 0.0,
+        use_norm: bool = True,
+        input_steps: int = 20,
+        output_steps: int = 20,
+        resolution: tuple[int, int] = (64, 128),
+        **kwargs,
+    ):
+        super().__init__()
+        self.channels = channels
+        self.input_steps = input_steps
+        self.output_steps = output_steps
+        shape_in = (input_steps, resolution[0], resolution[1], channels)
+        shape_out = (output_steps, resolution[0], resolution[1], channels)
+        self.core = RealPDEBench_iTransolver3d(
+            n_layers=layers,
+            width=width,
+            heads=heads,
+            slice_num=slice_num,
+            patch_size=patch_size,
+            dropout=dropout,
+            use_norm=use_norm,
+            shape_in=shape_in,
+            shape_out=shape_out,
+        )
+
+    def forward(self, x):
+        if x.shape[2] == self.channels:
+            x_in = x.permute(0, 1, 3, 4, 2)
+            out = self.core(x_in)
+            return out.permute(0, 1, 4, 2, 3)
+        return self.core(x)
+
 
