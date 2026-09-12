@@ -44,8 +44,9 @@ class SpectralConv3d(nn.Module):
 
     def forward(self, x):
         batchsize = x.shape[0]
-        #Compute Fourier coeffcients up to factor of e^(- something constant)
-        x_ft = torch.fft.rfftn(x, dim=[-3,-2,-1])
+        orig_dtype = x.dtype
+        # Compute Fourier coefficients in FP32 for cuFFT non-power-of-2 stability under AMP
+        x_ft = torch.fft.rfftn(x.float(), dim=[-3,-2,-1])
 
         # Multiply relevant Fourier modes
         out_ft = torch.zeros(batchsize, self.out_channels, x.size(-3), x.size(-2), x.size(-1)//2 + 1, \
@@ -61,7 +62,8 @@ class SpectralConv3d(nn.Module):
 
         #Return to physical space
         x = torch.fft.irfftn(out_ft, s=(x.size(-3), x.size(-2), x.size(-1)))
-        return x
+        return x.to(dtype=orig_dtype)
+
 
 class FNO3d(Model):
     def __init__(self, modes1, modes2, modes3, n_layers, width, shape_in, shape_out):

@@ -25,7 +25,8 @@ class AdaptiveFourierFilter3d(nn.Module):
     def forward(self, x):
         # x: [B, C, T, H, W]
         b, c, t, h, w = x.shape
-        x_ft = torch.fft.rfftn(x, dim=[-3, -2, -1], norm="ortho")  # [B, C, T, H, W//2+1]
+        orig_dtype = x.dtype
+        x_ft = torch.fft.rfftn(x.float(), dim=[-3, -2, -1], norm="ortho")  # [B, C, T, H, W//2+1]
         freq_w = x_ft.size(-1)
 
         # Reshape to [B, T, H, freq_w, blocks, block_size]
@@ -63,7 +64,8 @@ class AdaptiveFourierFilter3d(nn.Module):
         out_complex = torch.view_as_complex(out.contiguous()).reshape(b, t, h, freq_w, c)
         out_ft = out_complex.permute(0, 4, 1, 2, 3)
 
-        return torch.fft.irfftn(out_ft, s=(t, h, w), dim=[-3, -2, -1], norm="ortho").to(dtype=x.dtype)
+        return torch.fft.irfftn(out_ft, s=(t, h, w), dim=[-3, -2, -1], norm="ortho").to(dtype=orig_dtype)
+
 
 
 class AFNO3d(Model):
