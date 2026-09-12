@@ -7,7 +7,7 @@ set -e
 #   # Or multi-GPU parallel execution across GPUs 0,1,2,3:
 #   bash scripts/train_main_v4.sh --gpus 0,1,2,3
 #   # Or run a single config:
-#   bash scripts/train_main_v4.sh --config yaml_main_v4/09_triad-afno_depth4_grid2d.yaml --gpus 0
+#   bash scripts/train_main_v4.sh --config yaml_main_v4/4_10_triad-afno_depth4_grid2d.yaml --gpus 0
 
 if [ "$#" -eq 0 ]; then
     python -m pod_sim2real.training.train --config-dir yaml_main_v4/
