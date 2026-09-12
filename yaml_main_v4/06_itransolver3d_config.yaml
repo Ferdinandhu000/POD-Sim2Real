@@ -12,7 +12,7 @@ data:
 training:
   pretrain_epochs: 200
   finetune_epochs: 200
-  batch_size: 64
+  batch_size: 128
   patience: 10
   num_workers: 4
   seed: 42
@@ -20,7 +20,7 @@ training:
   use_amp: true
   grad_clip: 1.0
 optimizer:
-  lr: 0.0001
+  lr: 0.0002
   weight_decay: 0.0001
 loss:
   use_tke: false

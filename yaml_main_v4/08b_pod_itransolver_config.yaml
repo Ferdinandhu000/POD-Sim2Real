@@ -24,7 +24,7 @@ training:
   use_amp: true
   grad_clip: 1.0
 optimizer:
-  lr: 0.0001
+  lr: 0.0002
   weight_decay: 0.0001
 loss:
   use_tke: false
