@@ -28,14 +28,24 @@ class SpectralConv3d(nn.Module):
         self.modes3 = modes3
 
         self.scale = (1 / (in_channels * out_channels))
+        # Store weights as float32 with last dim 2 representing (real, imag).
+        # This resolves PyTorch AMP GradScaler "NotImplementedError: _amp_foreach_non_finite_check_and_unscale_cuda
+        # not implemented for ComplexFloat" while retaining exact complex tensor arithmetic.
         self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, \
-                                    self.modes2, self.modes3, dtype=torch.cfloat))
+                                    self.modes2, self.modes3, 2, dtype=torch.float32))
         self.weights2 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, \
-                                    self.modes2, self.modes3, dtype=torch.cfloat))
+                                    self.modes2, self.modes3, 2, dtype=torch.float32))
         self.weights3 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, \
-                                    self.modes2, self.modes3, dtype=torch.cfloat))
+                                    self.modes2, self.modes3, 2, dtype=torch.float32))
         self.weights4 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, \
-                                    self.modes2, self.modes3, dtype=torch.cfloat))
+                                    self.modes2, self.modes3, 2, dtype=torch.float32))
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        for name in ["weights1", "weights2", "weights3", "weights4"]:
+            key = prefix + name
+            if key in state_dict and torch.is_complex(state_dict[key]):
+                state_dict[key] = torch.view_as_real(state_dict[key])
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
 
     # Complex multiplication
     def compl_mul3d(self, input, weights):
@@ -49,16 +59,20 @@ class SpectralConv3d(nn.Module):
         x_ft = torch.fft.rfftn(x.float(), dim=[-3,-2,-1])
 
         # Multiply relevant Fourier modes
+        w1 = torch.view_as_complex(self.weights1)
+        w2 = torch.view_as_complex(self.weights2)
+        w3 = torch.view_as_complex(self.weights3)
+        w4 = torch.view_as_complex(self.weights4)
         out_ft = torch.zeros(batchsize, self.out_channels, x.size(-3), x.size(-2), x.size(-1)//2 + 1, \
                             dtype=torch.cfloat, device=x.device)
         out_ft[:, :, :self.modes1, :self.modes2, :self.modes3] = \
-            self.compl_mul3d(x_ft[:, :, :self.modes1, :self.modes2, :self.modes3], self.weights1)
+            self.compl_mul3d(x_ft[:, :, :self.modes1, :self.modes2, :self.modes3], w1)
         out_ft[:, :, -self.modes1:, :self.modes2, :self.modes3] = \
-            self.compl_mul3d(x_ft[:, :, -self.modes1:, :self.modes2, :self.modes3], self.weights2)
+            self.compl_mul3d(x_ft[:, :, -self.modes1:, :self.modes2, :self.modes3], w2)
         out_ft[:, :, :self.modes1, -self.modes2:, :self.modes3] = \
-            self.compl_mul3d(x_ft[:, :, :self.modes1, -self.modes2:, :self.modes3], self.weights3)
+            self.compl_mul3d(x_ft[:, :, :self.modes1, -self.modes2:, :self.modes3], w3)
         out_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3] = \
-            self.compl_mul3d(x_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3], self.weights4)
+            self.compl_mul3d(x_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3], w4)
 
         #Return to physical space
         x = torch.fft.irfftn(out_ft, s=(x.size(-3), x.size(-2), x.size(-1)))

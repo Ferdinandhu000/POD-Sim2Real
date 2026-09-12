@@ -168,7 +168,7 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
             },
         }
         _save(stage_dir / "last.pt", payload)
-        if config["save_epoch_checkpoints"]:
+        if config.get("save_epoch_checkpoints", False):
             _save(stage_dir / f"checkpoint_epoch_{epoch:03d}.pt", payload)
         if val < best:
             best = val
