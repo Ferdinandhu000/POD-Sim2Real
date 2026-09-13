@@ -1206,6 +1206,28 @@ def build_model(name, bases=None, width=32, input_steps=20, output_steps=20, **o
             resolution=options.get("resolution", (64, 128)),
         )
 
+    if name in {"pod-res-transformer3d", "pod-res-transformer", "pod-restransformer3d"}:
+        if bases is None:
+            raise ValueError("POD-ResTransformer3D requires fitted bases")
+        from .models_v3 import PODResTransformer3d
+        return PODResTransformer3d(
+            bases,
+            pod_rank=int(options.get("pod_rank", 96)),
+            pod_width=int(options.get("pod_width", width)),
+            pod_depth=int(options.get("pod_depth", options.get("depth", 4))),
+            pod_dropout=float(options.get("pod_dropout", 0.0)),
+            res_layers=int(options.get("res_layers", options.get("depth", 4))),
+            res_width=int(options.get("res_width", 64)),
+            res_heads=int(options.get("res_heads", 8)),
+            res_patch_size=options.get("patch_size", (4, 4)),
+            res_dropout=float(options.get("dropout", 0.0)),
+            input_steps=input_steps,
+            output_steps=output_steps,
+            resolution=options.get("resolution", (64, 128)),
+            return_aux=bool(options.get("return_aux", False)),
+            dual_stream_mode=str(options.get("dual_stream_mode", "temporal_concat")),
+        )
+
     if name == "pod-transformer":
         if bases is None:
             raise ValueError("POD models require fitted bases")

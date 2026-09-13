@@ -53,3 +53,4 @@ env/
 # 7. 临时分析与规划文档
 analysis_v3/
 yaml_main_v4/*.md
+yaml_main_v5/*.md

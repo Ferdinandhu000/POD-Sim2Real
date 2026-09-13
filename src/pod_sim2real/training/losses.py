@@ -55,12 +55,30 @@ def compute_loss(
     - TKE (turbulent kinetic energy) loss
     - Vorticity / Enstrophy gradient loss (forces resolution of small-scale vortex cores)
     """
-    mse = F.mse_loss(pred, target)
+    if isinstance(pred, (tuple, list)):
+        pred_main = pred[0]
+        pred_aux = pred[1] if len(pred) > 1 else None
+    else:
+        pred_main = pred
+        pred_aux = None
+
+    v_weight = float(kwargs.get("v_weight", 1.0))
+    if pred_main.ndim >= 4 and pred_main.shape[2] == 2 and v_weight != 1.0:
+        mse_u = F.mse_loss(pred_main[:, :, 0], target[:, :, 0])
+        mse_v = F.mse_loss(pred_main[:, :, 1], target[:, :, 1])
+        mse = (mse_u + v_weight * mse_v) / (1.0 + v_weight) * 2.0
+    else:
+        mse = F.mse_loss(pred_main, target)
+
+    pod_weight = float(kwargs.get("pod_weight", 0.0))
+    if pred_aux is not None and pod_weight > 0.0:
+        mse = mse + pod_weight * F.mse_loss(pred_aux, target)
+
     enable_tke = use_tke if use_tke is not None else (kind.startswith("pod-") and tke_weight > 0)
-    tke = relative_tke_loss(pred, target) if enable_tke else pred.new_zeros(())
+    tke = relative_tke_loss(pred_main, target) if enable_tke else pred_main.new_zeros(())
 
     enable_vort = use_vorticity if use_vorticity is not None else ("triad" in kind or "res" in kind)
-    vort = vorticity_loss(pred, target) if enable_vort and pred.ndim >= 4 and pred.shape[2] == 2 else pred.new_zeros(())
+    vort = vorticity_loss(pred_main, target) if enable_vort and pred_main.ndim >= 4 and pred_main.shape[2] == 2 else pred_main.new_zeros(())
 
     total_loss = mse
     if enable_tke:

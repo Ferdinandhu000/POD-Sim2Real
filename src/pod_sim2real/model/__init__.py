@@ -24,6 +24,9 @@ from .models_v2 import (
     Unet3d,
     iTransolver3d,
 )
+from .models_v3 import (
+    PODResTransformer3d,
+)
 
 __all__ = [
     "build_model",
@@ -45,6 +48,7 @@ __all__ = [
     "Transformer3d",
     "Transolver3d",
     "iTransolver3d",
+    "PODResTransformer3d",
     "fit_pod_bases",
     "fit_pod_bases_from_dataset",
     "fit_joint_pod_bases_from_datasets",

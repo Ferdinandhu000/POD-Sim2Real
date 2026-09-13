@@ -79,8 +79,17 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
 
     epochs = config["epochs"]
     patience = int(config.get("patience", 10))
+    freeze_res_epochs = int(config.get("freeze_residual_epochs", 0))
     for epoch in range(start_epoch, epochs + 1):
         start = time.perf_counter()
+        if freeze_res_epochs > 0 and stage == "pretrain_sim":
+            if epoch <= freeze_res_epochs:
+                if hasattr(model, "freeze_residual"):
+                    model.freeze_residual(True)
+            elif epoch == freeze_res_epochs + 1:
+                if hasattr(model, "freeze_residual"):
+                    model.freeze_residual(False)
+                    logger.info("Unfreezing residual module at epoch %d for joint training", epoch)
         model.train()
         totals = {key: torch.zeros((), device=device) for key in ("loss", "mse", "tke")}
         bar = tqdm(loader, desc=f"{stage} Epoch {epoch:03d}/{epochs:03d} train", leave=False)
@@ -102,6 +111,8 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
                     vorticity_weight=config.get("vorticity_weight", 0.1),
                     use_vorticity=config.get("use_vorticity", None),
                     return_scalars=False,
+                    v_weight=config.get("v_weight", 1.0),
+                    pod_weight=config.get("pod_weight", 0.0),
                 )
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -127,6 +138,8 @@ def train_stage(model, train_ds, val_ds, stage_dir, config, stage, device, initi
                     x, y = normalizer.preprocess(x, y)
                 with _autocast():
                     pred = model(x)
+                    if isinstance(pred, (tuple, list)):
+                        pred = pred[0]
                 val_sum += torch.nn.functional.mse_loss(pred.float(), y.float()).item() * len(x)
                 n += len(x)
         val = val_sum / max(n, 1)
@@ -236,9 +249,13 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0, normaliz
             if normalizer is not None:
                 x_in = normalizer.normalize(x)
                 pred_norm = model(x_in)
+                if isinstance(pred_norm, (tuple, list)):
+                    pred_norm = pred_norm[0]
                 pred = normalizer.denormalize(pred_norm)
             else:
                 pred = model(x)
+                if isinstance(pred, (tuple, list)):
+                    pred = pred[0]
             diff = pred.float() - y.float()
 
             total_sq_err += diff.square().sum().item()

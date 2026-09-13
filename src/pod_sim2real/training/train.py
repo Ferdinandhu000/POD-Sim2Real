@@ -56,6 +56,8 @@ MODELS = (
     "transformer3d",
     "transolver3d",
     "itransolver3d",
+    "pod-res-transformer3d",
+    "pod-res-transformer",
 )
 
 
@@ -523,6 +525,9 @@ def run_single_config(config_path: Path, args: argparse.Namespace) -> dict:
             "use_tke": loss.get("use_tke", None),
             "vorticity_weight": float(loss.get("vorticity_weight", 0.1)),
             "use_vorticity": loss.get("use_vorticity", None),
+            "v_weight": float(loss.get("v_weight", 1.0)),
+            "pod_weight": float(loss.get("pod_weight", 0.0)),
+            "freeze_residual_epochs": int(training.get("freeze_residual_epochs", 0)),
             "use_amp": bool(training.get("use_amp", True)),
             "save_epoch_checkpoints": bool(logcfg.get("save_epoch_checkpoints", True)),
             "logger": stage_logger,
