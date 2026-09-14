@@ -36,6 +36,30 @@ def vorticity_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     omega_target = compute_vorticity(target)
     return F.mse_loss(omega_pred, omega_target)
 
+
+def relative_l2_per_sample(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Return the official RealPDEBench relative L2 error for each sample.
+
+    RealPDEBench computes ``||pred-target||_2 / ||target||_2`` after flattening
+    each sample, then averages those ratios across samples.  A zero target is
+    treated as a zero-error sample when its prediction is also zero; otherwise
+    its ratio is finite and well-defined using a unit denominator.
+    """
+    if pred.shape[0] != target.shape[0]:
+        raise ValueError("pred and target must have the same batch dimension")
+    pred_flat = pred.float().reshape(pred.shape[0], -1)
+    target_flat = target.float().reshape(target.shape[0], -1)
+    err = torch.linalg.vector_norm(pred_flat - target_flat, dim=1)
+    norm = torch.linalg.vector_norm(target_flat, dim=1)
+    # Official data has non-zero norms. Keep degenerate synthetic/constant
+    # fields finite so evaluation remains usable instead of returning NaN.
+    return torch.where(norm > 0, err / norm, torch.where(err == 0, err, err / 1.0))
+
+
+def mean_relative_l2(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Mean official-style per-sample relative L2 error."""
+    return relative_l2_per_sample(pred, target).mean()
+
 def compute_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
@@ -116,8 +140,7 @@ def compute_metrics(pred: torch.Tensor, target: torch.Tensor) -> dict[str, float
     rmse = float(math.sqrt(max(mse, 0.0)))
     mae = float(diff.abs().mean().item())
 
-    target_norm = torch.norm(target.float())
-    rel_l2 = float((torch.norm(diff.float()) / (target_norm + 1e-8)).item())
+    rel_l2 = float(mean_relative_l2(pred, target).item())
 
     metrics = {
         "mse": mse,
@@ -136,11 +159,11 @@ def compute_metrics(pred: torch.Tensor, target: torch.Tensor) -> dict[str, float
         metrics["v_rmse"] = float(math.sqrt(max(v_mse, 0.0)))
         metrics["u_mae"] = float(u_diff.abs().mean().item())
         metrics["v_mae"] = float(v_diff.abs().mean().item())
-        metrics["u_rel_l2"] = float((torch.norm(u_diff.float()) / (torch.norm(u_tgt.float()) + 1e-8)).item())
-        metrics["v_rel_l2"] = float((torch.norm(v_diff.float()) / (torch.norm(v_tgt.float()) + 1e-8)).item())
+        metrics["u_rel_l2"] = float(mean_relative_l2(pred[:, :, 0], target[:, :, 0]).item())
+        metrics["v_rel_l2"] = float(mean_relative_l2(pred[:, :, 1], target[:, :, 1]).item())
         omega_pred = compute_vorticity(pred)
         omega_tgt = compute_vorticity(target)
         omega_diff = omega_pred - omega_tgt
         metrics["vorticity_mse"] = float(omega_diff.square().mean().item())
-        metrics["vorticity_rel_l2"] = float((torch.norm(omega_diff.float()) / (torch.norm(omega_tgt.float()) + 1e-8)).item())
+        metrics["vorticity_rel_l2"] = float(mean_relative_l2(omega_pred, omega_tgt).item())
     return metrics

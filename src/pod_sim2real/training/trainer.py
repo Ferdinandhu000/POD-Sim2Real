@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from .losses import compute_loss, compute_vorticity
+from .losses import compute_loss, compute_vorticity, relative_l2_per_sample
 from .logging_utils import log_metrics
 
 
@@ -242,6 +242,16 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0, normaliz
     vort_tgt_sq = 0.0
     vort_elements = 0
 
+    # RealPDEBench averages relative L2 ratios per sample, rather than taking
+    # one ratio after aggregating all samples.
+    rel_l2_sum = 0.0
+    rel_l2_count = 0
+    u_rel_l2_sum = 0.0
+    v_rel_l2_sum = 0.0
+    channel_rel_l2_count = 0
+    vort_rel_l2_sum = 0.0
+    vort_rel_l2_count = 0
+
     with torch.inference_mode():
         for x, y, _ in loader:
             x = x.to(device, non_blocking=device.type == "cuda")
@@ -257,6 +267,10 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0, normaliz
                 if isinstance(pred, (tuple, list)):
                     pred = pred[0]
             diff = pred.float() - y.float()
+
+            batch_rel_l2 = relative_l2_per_sample(pred, y)
+            rel_l2_sum += batch_rel_l2.sum().item()
+            rel_l2_count += batch_rel_l2.numel()
 
             total_sq_err += diff.square().sum().item()
             total_abs_err += diff.abs().sum().item()
@@ -279,6 +293,10 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0, normaliz
                 v_tgt_sq += v_y.square().sum().item()
                 v_elements += v_y.numel()
 
+                u_rel_l2_sum += relative_l2_per_sample(pred[:, :, 0], y[:, :, 0]).sum().item()
+                v_rel_l2_sum += relative_l2_per_sample(pred[:, :, 1], y[:, :, 1]).sum().item()
+                channel_rel_l2_count += pred.shape[0]
+
             if y.ndim >= 4 and y.shape[2] == 2:
                 omega_pred = compute_vorticity(pred.float())
                 omega_tgt = compute_vorticity(y.float())
@@ -288,17 +306,21 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0, normaliz
                 vort_abs_err += omega_diff.abs().sum().item()
                 vort_tgt_sq += omega_tgt.square().sum().item()
                 vort_elements += omega_tgt.numel()
+                batch_vort_rel_l2 = relative_l2_per_sample(omega_pred, omega_tgt)
+                vort_rel_l2_sum += batch_vort_rel_l2.sum().item()
+                vort_rel_l2_count += batch_vort_rel_l2.numel()
 
     mse = total_sq_err / max(total_elements, 1)
     rmse = math.sqrt(max(mse, 0.0))
     mae = total_abs_err / max(total_elements, 1)
-    rel_l2 = math.sqrt(total_sq_err) / (math.sqrt(total_tgt_sq) + 1e-8)
+    rel_l2 = rel_l2_sum / max(rel_l2_count, 1)
 
     res = {
         "mse": mse,
         "rmse": rmse,
         "mae": mae,
         "rel_l2": rel_l2,
+        "global_rel_l2": math.sqrt(total_sq_err) / (math.sqrt(total_tgt_sq) + 1e-8),
     }
     if u_elements > 0:
         u_mse = u_sq_err / u_elements
@@ -307,11 +329,13 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0, normaliz
             "u_mse": u_mse,
             "u_rmse": math.sqrt(max(u_mse, 0.0)),
             "u_mae": u_abs_err / u_elements,
-            "u_rel_l2": math.sqrt(u_sq_err) / (math.sqrt(u_tgt_sq) + 1e-8),
+            "u_rel_l2": u_rel_l2_sum / max(channel_rel_l2_count, 1),
+            "u_global_rel_l2": math.sqrt(u_sq_err) / (math.sqrt(u_tgt_sq) + 1e-8),
             "v_mse": v_mse,
             "v_rmse": math.sqrt(max(v_mse, 0.0)),
             "v_mae": v_abs_err / v_elements,
-            "v_rel_l2": math.sqrt(v_sq_err) / (math.sqrt(v_tgt_sq) + 1e-8),
+            "v_rel_l2": v_rel_l2_sum / max(channel_rel_l2_count, 1),
+            "v_global_rel_l2": math.sqrt(v_sq_err) / (math.sqrt(v_tgt_sq) + 1e-8),
         })
     if vort_elements > 0:
         vort_mse = vort_sq_err / vort_elements
@@ -319,6 +343,6 @@ def evaluate_model(model, dataset, device, batch_size=1, num_workers=0, normaliz
             "vorticity_mse": vort_mse,
             "vorticity_rmse": math.sqrt(max(vort_mse, 0.0)),
             "vorticity_mae": vort_abs_err / vort_elements,
-            "vorticity_rel_l2": math.sqrt(vort_sq_err) / (math.sqrt(vort_tgt_sq) + 1e-8),
+            "vorticity_rel_l2": vort_rel_l2_sum / max(vort_rel_l2_count, 1),
         })
     return res

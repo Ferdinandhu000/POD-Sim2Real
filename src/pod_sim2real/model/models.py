@@ -1228,6 +1228,28 @@ def build_model(name, bases=None, width=32, input_steps=20, output_steps=20, **o
             dual_stream_mode=str(options.get("dual_stream_mode", "temporal_concat")),
         )
 
+    if name in {"pod-res-unet3d", "pod-res-unet", "pod-resunet3d"}:
+        if bases is None:
+            raise ValueError("POD-ResUNet3D requires fitted bases")
+        from .models_v3 import PODResUNet3d
+        return PODResUNet3d(
+            bases,
+            pod_rank=int(options.get("pod_rank", 96)),
+            pod_width=int(options.get("pod_width", width)),
+            pod_depth=int(options.get("pod_depth", options.get("depth", 4))),
+            pod_dropout=float(options.get("pod_dropout", 0.0)),
+            res_width=int(options.get("res_width", 64)),
+            res_dim_mults=tuple(options.get("res_dim_mults", (1, 2, 4))),
+            res_attn_heads=int(options.get("res_attn_heads", 4)),
+            res_attn_dim_head=int(options.get("res_attn_dim_head", 32)),
+            resnet_groups=int(options.get("resnet_groups", 8)),
+            input_steps=input_steps,
+            output_steps=output_steps,
+            resolution=options.get("resolution", (64, 128)),
+            residual_input=str(options.get("residual_input", "channel_concat")),
+            return_aux=bool(options.get("return_aux", False)),
+        )
+
     if name == "pod-transformer":
         if bases is None:
             raise ValueError("POD models require fitted bases")
@@ -1301,5 +1323,4 @@ def build_model(name, bases=None, width=32, input_steps=20, output_steps=20, **o
             modes=int(options.get("modes", 8)),
         )
     raise ValueError(f"unknown model {name}")
-
 

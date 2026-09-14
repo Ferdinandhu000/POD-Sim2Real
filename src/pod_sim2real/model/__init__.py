@@ -25,6 +25,7 @@ from .models_v2 import (
     iTransolver3d,
 )
 from .models_v3 import (
+    PODResUNet3d,
     PODResTransformer3d,
 )
 
@@ -49,8 +50,8 @@ __all__ = [
     "Transolver3d",
     "iTransolver3d",
     "PODResTransformer3d",
+    "PODResUNet3d",
     "fit_pod_bases",
     "fit_pod_bases_from_dataset",
     "fit_joint_pod_bases_from_datasets",
 ]
-

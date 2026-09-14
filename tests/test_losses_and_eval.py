@@ -43,6 +43,17 @@ def test_compute_metrics_exact():
     assert pytest.approx(metrics['u_rel_l2']) == 0.5
     assert pytest.approx(metrics['v_rel_l2']) == 0.5
 
+def test_compute_metrics_matches_official_per_sample_relative_l2():
+    # The official RealPDEBench metric averages one ratio per sample. A global
+    # norm ratio would incorrectly weight the high-energy second sample.
+    target = torch.stack([
+        torch.ones(2, 2, 2),
+        torch.full((2, 2, 2), 10.0),
+    ])
+    pred = target + 1.0
+    metrics = compute_metrics(pred, target)
+    assert metrics['rel_l2'] == pytest.approx((1.0 + 0.1) / 2.0)
+
 def test_evaluate_model_dictionary():
     class DummyModel(torch.nn.Module):
         def forward(self, x):

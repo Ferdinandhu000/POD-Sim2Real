@@ -58,6 +58,8 @@ MODELS = (
     "itransolver3d",
     "pod-res-transformer3d",
     "pod-res-transformer",
+    "pod-res-unet3d",
+    "pod-res-unet",
 )
 
 
